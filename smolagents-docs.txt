@@ -1,16 +1,9 @@
----
-title: "ecrivez"
----
+Help on package smolagents:
 
-```{python}
-import smolagents
-help(smolagents)
-```
-
-## NAME
+NAME
     smolagents - # coding=utf-8
 
-## PACKAGE CONTENTS
+PACKAGE CONTENTS
     _function_type_hints_utils
     agent_types
     agents
@@ -27,17 +20,17 @@ help(smolagents)
     utils
     vision_web_browser
 
-## DATA
-    ```
+DATA
     AUTHORIZED_TYPES = ['string', 'boolean', 'integer', 'number', 'image',...
     TOOL_MAPPING = {'python_interpreter': <class 'smolagents.default_tools...
     leopard_prompt = 'How many seconds would it take for a leopard at full...
     tool_role_conversions = {<MessageRole.TOOL_CALL: 'tool-call'>: <Messag...
 
+VERSION
+    1.8.0
 
-```{python}
-import smolagents
-for module in dir(smolagents):
-    if not module.startswith('_'):
-        print(f'\n--- {module} ---\n')
-        help(getattr(smolagents, module))
+FILE
+    /home/matias/git/matias-ceau/ecrivez/.venv/lib/python3.12/site-packages/smolagents/__init__.py
+
+
+None

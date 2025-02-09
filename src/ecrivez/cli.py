@@ -46,25 +46,10 @@ def init(model, name):
 @cli.command()
 @click.option("--model", help="LLM model to use")
 @click.option("--editor", help="Editor to use")
-def set(model, editor):
+def  (model, editor):
     """Modify Ecrivez configuration"""
-    config_path = Path(".ecrivez/config.yaml")
-
-    if not config_path.exists():
-        click.echo("No Ecrivez configuration found. Run 'ecrivez init' first.")
-        return
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    if model:
-        config["model"] = model
-    if editor:
-        config["editor"] = editor
-
-    with open(config_path, "w") as f:
-        yaml.dump(config, f)
-
+    # Update config
+    modify_config(model, editor)
     click.echo("Updated configuration")
 
 
