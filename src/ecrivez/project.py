@@ -2,17 +2,29 @@ from pathlib import Path
 import subprocess
 import os
 import yaml
+import click
+from typing import Optional
 
-def init_project(model : str = "gpt-4o", name : str = "", path : Path = None):
+
+def usage():
+    """Print usage information"""
+    click.echo("Usage: ecrivez init [name] [path]")
+    exit(1)
+
+
+def init_project(model: str = "gpt-4o", name: str = "", path: Optional[Path] = None):
     """Initialize a new Ecrivez project which needs a name, a model and a path.
     It can also be initialized in the current directory"""
     if name != "":
         path = Path(name)
         if not path.exists():
-            subprocess.run(["mkdir", path])
-    else:
+            Path(path).mkdir(parents=True, exist_ok=True)
+    elif path == ".":
         path = Path(".")
         name = path.name
+    else:
+        raise click.UsageError("Project name or path is required")
+
     os.chdir(path)
     # Initialize git repository
     if not Path(".git").exists():
@@ -28,11 +40,11 @@ def init_project(model : str = "gpt-4o", name : str = "", path : Path = None):
     with open(ecrivez_dir / "config.yaml", "w") as f:
         yaml.dump(config, f)
 
+
 def open_project(input_string):
     """Open an existing Ecrivez project"""
     path = Path(input_string)
     if path.exists():
-
         os.chdir(path)
     else:
         click.echo("Project does not exist")
@@ -44,8 +56,11 @@ def open_project(input_string):
     # Check if .ecrivez directory exists
     if not Path(".ecrivez").exists():
         click.echo("No Ecrivez configuration found. Run 'ecrivez init' first.")
-        return  
+        return
     else:
+        with open(".ecrivez/config.yaml") as f:
+            config = yaml.safe_load(f)
+        return config
 
 
 def modify_config(model, editor):
@@ -66,3 +81,10 @@ def modify_config(model, editor):
 
     with open(config_path, "w") as f:
         yaml.dump(config, f)
+
+
+def greet(name: Optional[str] = None) -> None:
+    if name is not None:
+        print(f"Hello, {name}!")
+    else:
+        print("Hello, World!")
