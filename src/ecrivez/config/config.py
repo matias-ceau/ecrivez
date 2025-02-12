@@ -75,7 +75,7 @@ Configuration for ecrivez. Structure of the toml file:
     [session]
 ```
 
-$XDG_DATA_HOME/ecrivez/session-<session_id>.jsonld
+config_defaults/templates/session-<session_id>.jsonld
 ```jsonld
 {
     "@context": "https://schema.org/",
@@ -114,32 +114,33 @@ $XDG_DATA_HOME/ecrivez/session-<session_id>.jsonld
 
 """
 
-from datetime import datetime
-from pathlib import Path
+from pydantic import BaseModel, Field
 
-import toml
-from pydantic import BaseModel
-from xdg import XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_RUNTIME_DIR
-
-
-class Defaults(BaseModel):
-    DEFAULT_MODEL: str = "gpt-4o"
-    DEFAULT_EDITOR: str = "nvim"
-    SESSION_ID: str = datetime.now().isoformat()
-    for env in [XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_CACHE_HOME, XDG_RUNTIME_DIR]:
-        setattr(self, env, self.find_or_create(env))
-
-    def find_or_create(self, path: Path) -> Path:
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
-        return path.absolute()
+from .agents import DefaultAgents
+from .general import GeneralConfig
+from .mcp import DefaultMCP
+from .paths import DefaultPaths
+from .prompts import DefaultPrompts
+from .session import DefaultSession
+from .tools import DefaultTools
 
 
-class Configuration(Defaults, BaseModel):
-    def __init__(self, config_path: Path):
-        super(Defaults, self).__init__()  # Initialize BaseModel first
-        self.config_path = config_path
-        with open(config_path, "r") as f:
-            self.config = toml.load(f)
-            for k, v in self.config.items():
-                setattr(self, k, v)
+class Configuration(BaseModel, strict=True):
+    general: GeneralConfig = Field(GeneralConfig, description="General config")
+    paths: DefaultPaths = Field(DefaultPaths, description="Path config")
+    tools: DefaultTools = Field(DefaultTools, description="Tool config")
+    agents: DefaultAgents = Field(DefaultAgents, description="Agent config")
+    mcp: DefaultMCP = Field(DefaultMCP, description="MCP config")
+    prompts: DefaultPrompts = Field(DefaultPrompts, description="Prompts config")
+    session: DefaultSession = Field(DefaultSession, description="Session config")
+
+    def __init__(self):
+        super().__init__()
+        self.paths = _get_paths()
+        self.general = _get_general_config()
+        self.tools = DefaultTools()
+        self.agents = DefaultAgents()
+        self.mcp = DefaultMCP()
+        self.prompts = DefaultPrompts()
+        self.session = DefaultSession()
+        self.session = DefaultSession()

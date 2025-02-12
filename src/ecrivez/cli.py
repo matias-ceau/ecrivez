@@ -1,6 +1,6 @@
 import click
 
-from .config import Configuration
+from .config.config import Configuration
 from .editor import start_editor
 from .project import init_project, modify_config
 

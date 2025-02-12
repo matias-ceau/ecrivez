@@ -10,4 +10,10 @@
     "editor.insertSpaces": true,
     "editor.detectIndentation": false,
     "editor.formatOnSaveMode": "modificationsIfAvailable",
+    "[toml]": {
+        "editor.defaultFormatter": "tamasfe.even-better-toml"
+    },
+    "[json]": {
+        "editor.defaultFormatter": "vscode.json-language-features"
+    },
 }
