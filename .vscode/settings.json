@@ -10,9 +10,4 @@
     "editor.insertSpaces": true,
     "editor.detectIndentation": false,
     "editor.formatOnSaveMode": "modificationsIfAvailable",
-    "editor.formatOnSaveOptions": {
-        "tabSize": 4,
-        "insertSpaces": true,
-        "detectIndentation": false
-    },
 }

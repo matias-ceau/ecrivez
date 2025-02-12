@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# from qtermwidget import QTermWidget
+from qtermwidget import QTermWidget
 
 
 class BrowserView(QWebEngineView):
@@ -107,28 +107,32 @@ class BrowserTerminalApp(QMainWindow):
 
     def handleBrowserKeys(self, event: QKeyEvent):
         # Basic vim-style navigation
-        key = event.key()
-        page = self.browser.page()
+        key: Qt.Key = event.key()
+        page: QWebEnginePage = self.browser.page()
         if not page:
             return
 
         if key == Qt.Key.Key_J:
-            page.runJavaScript("window.scrollBy(0, 50)", lambda _: None)
+            page.runJavaScript("window.scrollBy(0, 50)", lambda _: None)  # type: ignore
         elif key == Qt.Key.Key_K:
-            page.runJavaScript("window.scrollBy(0, -50)", lambda _: None)
+            page.runJavaScript("window.scrollBy(0, -50)", lambda _: None)  # type: ignore
         elif key == Qt.Key.Key_H:
             self.browser.back()
         elif key == Qt.Key.Key_L:
             self.browser.forward()
         elif key == Qt.Key.Key_G:
-            page.runJavaScript("window.scrollTo(0, 0)", lambda _: None)
-        elif key == Qt.Key.Key_Shift and event.text() == "G":
+            page.runJavaScript("window.scrollTo(0, 0)", lambda _: None)  # type: ignore
+        elif (
+            key == Qt.Key.Key_G
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
             page.runJavaScript(
-                "window.scrollTo(0, document.body.scrollHeight)", lambda _: None
+                "window.scrollTo(0, document.body.scrollHeight)",
+                lambda _: None,  # type: ignore
             )
         else:
             # Pass other keys to the default handler
-            QWebEngineView.keyPressEvent(self.browser, event)
+            self.browser.keyPressEvent(event)
 
 
 if __name__ == "__main__":

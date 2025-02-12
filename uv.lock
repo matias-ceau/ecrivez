@@ -206,6 +206,7 @@ dependencies = [
     { name = "pynvim" },
     { name = "pyqt6" },
     { name = "pyqt6-webengine" },
+    { name = "pytoml" },
     { name = "pyyaml" },
     { name = "smolagents" },
     { name = "xdg" },
@@ -223,6 +224,7 @@ requires-dist = [
     { name = "pynvim", specifier = ">=0.5.2" },
     { name = "pyqt6", specifier = ">=6.8.1" },
     { name = "pyqt6-webengine", specifier = ">=6.8.0" },
+    { name = "pytoml", specifier = ">=0.1.21" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "smolagents", specifier = ">=1.8.0" },
     { name = "xdg", specifier = ">=6.0.0" },
@@ -1021,6 +1023,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/bc/57/e84d88dfe0aec03b7a2d4327012c1627ab5f03652216c63d49846d7a6c58/python-dotenv-1.0.1.tar.gz", hash = "sha256:e324ee90a023d808f1959c46bcbc04446a10ced277783dc6ee09987c37ec10ca", size = 39115 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/3e/b68c118422ec867fa7ab88444e1274aa40681c606d59ac27de5a5588f082/python_dotenv-1.0.1-py3-none-any.whl", hash = "sha256:f7b63ef50f1b690dddf550d03497b66d609393b40b564ed0d674909a68ebf16a", size = 19863 },
+]
+
+[[package]]
+name = "pytoml"
+version = "0.1.21"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/ba/98ee2054a2d7b8bebd367d442e089489250b6dc2aee558b000e961467212/pytoml-0.1.21.tar.gz", hash = "sha256:8eecf7c8d0adcff3b375b09fe403407aa9b645c499e5ab8cac670ac4a35f61e7", size = 8783 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/47/c7f8a0f210ad18576840922e0b504f0b7f5f73aea4a52ab14c5b58517edf/pytoml-0.1.21-py2.py3-none-any.whl", hash = "sha256:57a21e6347049f73bfb62011ff34cd72774c031b9828cb628a752225136dfc33", size = 8537 },
 ]
 
 [[package]]

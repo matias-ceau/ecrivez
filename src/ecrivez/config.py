@@ -3,11 +3,11 @@ Configuration for ecrivez. Structure of the toml file:
 ```toml
 [[ecrivez]]
 [user].authentication
-    name = "gerard" # or command line argument
-    email = "gerard@ecrivez.com" # or command line argument
-    password = "password" # or command line argument
-    api_key = "api_key" # or command line argument
-    api_key_cmd = "api_key_strategy" # or command line argument
+    name = "gerard"
+    email = "gerard@ecrivez.com"
+    password = "password"
+    api_key = "api_key"
+    api_key_cmd = "api_key_strategy"
     'api_key_default_strategy' = ['$(sh pass api/all | grep name', python dotenv.load()']
     'include_cfg' = ['.config/ecrivez/extra.toml', '.config/ecrivez/guienv.local']
 
