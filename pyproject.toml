@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.1.7",
+    "gradio>=5.17.0",
     "ipykernel>=6.29.5",
     "ipython>=8.30.0",
     "libtmux>=0.39.0",
@@ -31,7 +32,7 @@ ecrivez = "ecrivez.cli:cli"
 include-package-data = true
 
 [tool.hatch.version]
-path = "ecrivez/__init__.py"
+path = "src/ecrivez/__init__.py"
 
 [build-system]
 requires = ["hatchling"]
