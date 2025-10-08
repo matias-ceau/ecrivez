@@ -19,7 +19,7 @@ def init_project(model: str = "gpt-4o", name: str = "", path: Optional[Path] = N
         path = Path(name)
         if not path.exists():
             Path(path).mkdir(parents=True, exist_ok=True)
-    elif path == ".":
+    elif path == "." or path is None:
         path = Path(".")
         name = path.name
     else:
@@ -35,10 +35,16 @@ def init_project(model: str = "gpt-4o", name: str = "", path: Optional[Path] = N
     ecrivez_dir.mkdir(exist_ok=False)
 
     # Create and write config file
-    config = {"name": name, "model": model}
+    config = {"name": name, "model": model, "provider": "openai"}
 
     with open(ecrivez_dir / "config.yaml", "w") as f:
         yaml.dump(config, f)
+
+    # Bootstrap main source file so the editor has something to open
+    main_file = path / f"{name}.py"
+    if not main_file.exists():
+        main_file.parent.mkdir(parents=True, exist_ok=True)
+        main_file.write_text("\n")
 
 
 def open_project(input_string):

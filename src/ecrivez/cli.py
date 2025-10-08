@@ -1,10 +1,6 @@
 import click
-
-from .config.config import Configuration
 from .editor import start_editor
 from .project import init_project, modify_config
-
-CFG = Configuration()
 
 @click.group()
 def ecrivez():
@@ -38,7 +34,19 @@ def chat(file: str | None):
 
 
 @click.command()
-@click.option("--file", help="Filename to open")
-def repl(file: str | None):
-    """Start a REPL session"""
-    pass
+def repl():
+    """Start an interactive chat REPL (runs outside tmux as well)."""
+    from .chat import start_repl
+
+    start_repl()
+
+
+# ---------------------------------------------------------------------------
+# Wire sub-commands into the group
+# ---------------------------------------------------------------------------
+
+
+ecrivez.add_command(init)
+ecrivez.add_command(config)
+ecrivez.add_command(chat)
+ecrivez.add_command(repl)

@@ -25,11 +25,21 @@ def start_editor(file: str | None) -> None:
     file = file if file else config["name"]
     window.attached_pane.send_keys(f"nvim --listen {nvim_socket} {file}")
 
-    # Connect to nvim instance
-    nvim = attach("socket", path=nvim_socket)
+    # Best-effort: wait a bit for Neovim to create its socket, otherwise skip
+    import time
+
+    for _ in range(20):  # 2 seconds total
+        if Path(nvim_socket).exists():
+            try:
+                nvim = attach("socket", path=nvim_socket)
+                break
+            except FileNotFoundError:
+                pass
+        time.sleep(0.1)
 
     # Start REPL in second pane
-    # Note: REPL implementation details would go here
+    window.panes[1].send_keys("ecrivez repl", enter=True)
+
     # Keep session alive
     session.attach_session()
     session.attach_session()

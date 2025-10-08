@@ -14,6 +14,7 @@ dependencies = [
     "ipython>=8.30.0",
     "libtmux>=0.39.0",
     "mypy>=1.15.0",
+    "openai>=1.86.0",
     "pip>=25.0",
     "pydantic>=2.10.6",
     "pynvim>=0.5.2",
@@ -26,7 +27,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ecrivez = "ecrivez.cli:cli"
+ecrivez = "ecrivez.cli:ecrivez"
 
 [tool.setuptools]
 include-package-data = true
