@@ -1,36 +1,14 @@
 [project]
 name = "ecrivez"
 dynamic = ["version"]
-description = "Add your description here"
+description = "A medical secretary in the terminal: dictate roughly, get a clean note."
 readme = "README.md"
-authors = [
-    { name = "Matias Ceau", email = "matias@ceau.net" }
-]
+authors = [{ name = "Matias Ceau", email = "matias@ceau.net" }]
 requires-python = ">=3.13"
-dependencies = [
-    "click>=8.1.7",
-    "gradio>=5.17.0",
-    "ipykernel>=6.29.5",
-    "ipython>=8.30.0",
-    "libtmux>=0.39.0",
-    "mypy>=1.15.0",
-    "openai>=1.86.0",
-    "pip>=25.0",
-    "pydantic>=2.10.6",
-    "pynvim>=0.5.2",
-    "pyqt6>=6.8.1",
-    "pyqt6-webengine>=6.8.0",
-    "pytoml>=0.1.21",
-    "pyyaml>=6.0.2",
-    "smolagents>=1.8.0",
-    "xdg>=6.0.0",
-]
+dependencies = []
 
 [project.scripts]
-ecrivez = "ecrivez.cli:ecrivez"
-
-[tool.setuptools]
-include-package-data = true
+ecrivez = "ecrivez.cli:main"
 
 [tool.hatch.version]
 path = "src/ecrivez/__init__.py"
@@ -40,7 +18,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = [
-    "nbclient>=0.10.2",
-    "nbformat>=5.10.4",
-]
+dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1.390"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

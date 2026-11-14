@@ -1,0 +1,2 @@
+- Style médical français, concis, phrases nominales acceptées.
+- Médicaments en DCI.
