@@ -113,3 +113,78 @@ def test_record_fails_when_nothing_was_captured(tmp_path):
     (tmp_path / "a.wav").write_bytes(b"x" * 44)
     with pytest.raises(ToolError):
         record(tmp_path / "a.wav", wait=lambda: None, spawn=lambda argv: FakeProcess(), settle=0)
+
+
+class FakeOnline:
+    """ffmpeg splits into two parts; the API answers one text per part."""
+
+    def __init__(self, answers: list[dict]) -> None:
+        self.answers = answers
+        self.posts: list[tuple[str, str, dict]] = []
+        self.ran: list[list[str]] = []
+
+    def run(self, argv: list[str], stdin: str | None = None) -> str:
+        self.ran.append(argv)
+        pattern = Path(argv[-1])
+        for i in range(len(self.answers)):
+            (pattern.parent / f"part{i:03d}.mp3").write_bytes(f"mp3-{i}".encode())
+        return ""
+
+    def post(self, url: str, key: str, payload: dict) -> dict:
+        self.posts.append((url, key, payload))
+        return self.answers[len(self.posts) - 1]
+
+
+def _answer(text: str) -> dict:
+    return {"choices": [{"message": {"content": text}}]}
+
+
+ONLINE = {"OPENAI_API_KEY": "sk-test", "OPENAI_BASE_URL": "https://example.test/api/v1/"}
+
+
+def test_online_transcription_joins_the_parts_in_order(tmp_path):
+    fake = FakeOnline([_answer("Bonjour."), _answer("Au revoir.")])
+    text = transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert text == "Bonjour.\nAu revoir."
+    assert fake.ran[0][0] == "ffmpeg" and "segment" in fake.ran[0]
+
+
+def test_online_transcription_sends_each_part_as_base64_mp3_with_key_and_model(tmp_path):
+    import base64
+
+    fake = FakeOnline([_answer("x")])
+    transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    url, key, payload = fake.posts[0]
+    assert url == "https://example.test/api/v1/chat/completions"
+    assert key == "sk-test"
+    assert payload["model"] == "google/gemini-4-hydrogen"
+    sound = payload["messages"][0]["content"][1]["input_audio"]
+    assert sound == {"data": base64.b64encode(b"mp3-0").decode(), "format": "mp3"}
+
+
+def test_online_model_and_lexicon_hint_are_configurable(tmp_path):
+    fake = FakeOnline([_answer("x")])
+    env = {**ONLINE, "ECRIVEZ_AUDIO_MODEL": "autre/modele"}
+    transcribe(tmp_path / "a.flac", "craving, diazépam", env, fake.run, fake.post)
+    payload = fake.posts[0][2]
+    assert payload["model"] == "autre/modele"
+    assert "craving, diazépam" in payload["messages"][0]["content"][0]["text"]
+
+
+def test_inaudible_parts_count_as_nothing_heard(tmp_path):
+    fake = FakeOnline([_answer("[inaudible]"), _answer(" [inaudible] ")])
+    assert transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post) == ""
+
+
+def test_online_api_error_is_reported_as_tool_error(tmp_path):
+    fake = FakeOnline([{"error": {"message": "crédit insuffisant"}}])
+    with pytest.raises(ToolError) as err:
+        transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert "crédit insuffisant" in str(err.value)
+
+
+def test_local_backend_can_be_forced_even_with_a_key(tmp_path):
+    run = FakeWhisper("local")
+    env = {**ONLINE, "ECRIVEZ_TRANSCRIBER": "local"}
+    assert transcribe(tmp_path / "a.wav", "", env, run) == "local"
+    assert run.argv[0] == "whisper"

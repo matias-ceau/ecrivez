@@ -27,9 +27,14 @@ Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`
 
 ## Prérequis
 
-`claude` (Claude Code, connecté à un abonnement), `whisper-cli` (whisper.cpp),
-`ffmpeg`, `pw-record` (PipeWire), `wl-copy`.
+`claude` (Claude Code, connecté à un abonnement), `ffmpeg`, `pw-record` (PipeWire), `wl-copy`.
 
-Le modèle Whisper se règle par `ECRIVEZ_WHISPER_MODEL`.
+## Transcription
+
+- En ligne dès que `OPENAI_API_KEY` est définie : l'audio est envoyé par tranches de
+  10 minutes à `OPENAI_BASE_URL` (OpenRouter par défaut), modèle `ECRIVEZ_AUDIO_MODEL`
+  (défaut `google/gemini-4-hydrogen`).
+- Sinon, ou avec `ECRIVEZ_TRANSCRIBER=local` : commande `whisper` (openai-whisper),
+  modèle `ECRIVEZ_WHISPER_MODEL` (défaut `large-v3-turbo`).
 
 Voir [SPEC.md](SPEC.md).
