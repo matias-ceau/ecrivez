@@ -188,3 +188,27 @@ def test_local_backend_can_be_forced_even_with_a_key(tmp_path):
     env = {**ONLINE, "ECRIVEZ_TRANSCRIBER": "local"}
     assert transcribe(tmp_path / "a.wav", "", env, run) == "local"
     assert run.argv[0] == "whisper"
+
+
+def test_openrouter_key_alone_enables_online_transcription(tmp_path):
+    fake = FakeOnline([_answer("x")])
+    transcribe(tmp_path / "a.flac", "", {"OPENROUTER_API_KEY": "sk-or-test"}, fake.run, fake.post)
+    url, key, _ = fake.posts[0]
+    assert url == "https://openrouter.ai/api/v1/chat/completions"
+    assert key == "sk-or-test"
+
+
+def test_openrouter_key_wins_over_openai_settings(tmp_path):
+    fake = FakeOnline([_answer("x")])
+    env = {**ONLINE, "OPENROUTER_API_KEY": "sk-or-test"}
+    transcribe(tmp_path / "a.flac", "", env, fake.run, fake.post)
+    url, key, _ = fake.posts[0]
+    assert url == "https://openrouter.ai/api/v1/chat/completions"
+    assert key == "sk-or-test"
+
+
+def test_forcing_online_without_any_key_is_a_clear_error(tmp_path):
+    fake = FakeOnline([_answer("x")])
+    with pytest.raises(ToolError) as err:
+        transcribe(tmp_path / "a.flac", "", {"ECRIVEZ_TRANSCRIBER": "online"}, fake.run, fake.post)
+    assert "OPENROUTER_API_KEY" in str(err.value)

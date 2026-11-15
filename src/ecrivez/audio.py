@@ -112,8 +112,15 @@ def _transcribe_local(audio: Path, hint: str, env: Mapping[str, str], run: Run) 
         return result.read_text(encoding="utf-8").strip() if result.exists() else ""
 
 
+def _account(env: Mapping[str, str]) -> tuple[str, str]:
+    """(base URL, key): OpenRouter's own variable first, OpenAI-style settings otherwise."""
+    if key := env.get("OPENROUTER_API_KEY"):
+        return DEFAULT_BASE_URL, key
+    return (env.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"), env["OPENAI_API_KEY"]
+
+
 def _transcribe_online(audio: Path, hint: str, env: Mapping[str, str], run: Run, post: Post) -> str:
-    base = (env.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    base, key = _account(env)
     model = env.get("ECRIVEZ_AUDIO_MODEL") or DEFAULT_AUDIO_MODEL
     prompt = ONLINE_PROMPT + (f"\nTermes susceptibles d'apparaître : {hint}" if hint else "")
     texts: list[str] = []
@@ -134,7 +141,7 @@ def _transcribe_online(audio: Path, hint: str, env: Mapping[str, str], run: Run,
                 "reasoning": {"effort": "minimal"},
                 "messages": [{"role": "user", "content": content}],
             }
-            answer = post(f"{base}/chat/completions", env["OPENAI_API_KEY"], payload)
+            answer = post(f"{base}/chat/completions", key, payload)
             if "error" in answer or not answer.get("choices"):
                 detail = (answer.get("error") or {}).get("message") or "réponse vide"
                 raise ToolError(ONLINE, str(detail))
@@ -152,9 +159,10 @@ def transcribe(
     post: Post = post_json,
 ) -> str:
     """Online when an API key is set (or forced), local Whisper otherwise."""
-    choice = env.get("ECRIVEZ_TRANSCRIBER") or ("online" if env.get("OPENAI_API_KEY") else "local")
+    has_key = bool(env.get("OPENROUTER_API_KEY") or env.get("OPENAI_API_KEY"))
+    choice = env.get("ECRIVEZ_TRANSCRIBER") or ("online" if has_key else "local")
     if choice == "local":
         return _transcribe_local(audio, hint, env, run)
-    if not env.get("OPENAI_API_KEY"):
-        raise ToolError(ONLINE, "variable OPENAI_API_KEY absente")
+    if not has_key:
+        raise ToolError(ONLINE, "variable OPENROUTER_API_KEY absente")
     return _transcribe_online(audio, hint, env, run, post)

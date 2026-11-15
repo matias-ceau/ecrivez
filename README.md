@@ -31,9 +31,9 @@ Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`
 
 ## Transcription
 
-- En ligne dès que `OPENAI_API_KEY` est définie : l'audio est envoyé par tranches de
-  10 minutes à `OPENAI_BASE_URL` (OpenRouter par défaut), modèle `ECRIVEZ_AUDIO_MODEL`
-  (défaut `google/gemini-4-hydrogen`).
+- En ligne dès que `OPENROUTER_API_KEY` est définie (à défaut, `OPENAI_API_KEY` avec
+  `OPENAI_BASE_URL`) : l'audio est envoyé par tranches de 10 minutes, modèle
+  `ECRIVEZ_AUDIO_MODEL` (défaut `google/gemini-4-hydrogen`).
 - Sinon, ou avec `ECRIVEZ_TRANSCRIBER=local` : commande `whisper` (openai-whisper),
   modèle `ECRIVEZ_WHISPER_MODEL` (défaut `large-v3-turbo`).
 
