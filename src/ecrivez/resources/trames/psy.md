@@ -44,3 +44,10 @@ Histoire générale de la maladie
 
 Histoire récente de la maladie actuelle
 (facteurs de stress récents aigus ou chroniques : rupture, surmenage, perte d'emploi, traumatisme ; facteurs liés à une substance psychoactive : intoxication aiguë ou sevrage ; facteurs médicamenteux : arrêt, nouveau traitement, interaction, surdosage ou sous-dosage, observance)
+
+6. EXAMEN CLINIQUE
+Examen psychiatrique (présentation et contact, humeur et affects, anxiété, cours et contenu de la pensée, perceptions, idées suicidaires, sommeil, appétit, conscience des troubles) :
+Examen somatique (constantes, poids, examen général) :
+
+7. CONDUITE À TENIR
+(orientation et mode de soins, traitements, examens complémentaires, surveillance, prochain rendez-vous)
