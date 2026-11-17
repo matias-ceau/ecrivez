@@ -10,7 +10,7 @@ def desk(tmp_path):
 
 def test_opening_seeds_tca_template(desk):
     assert "Motif de la demande" in desk.template("tca")
-    assert desk.templates() == ["tca"]
+    assert desk.templates() == ["psy", "tca"]
 
 
 def test_opening_never_overwrites_edited_template(tmp_path):
@@ -23,7 +23,7 @@ def test_opening_never_overwrites_edited_template(tmp_path):
 def test_unknown_template_lists_available(desk):
     with pytest.raises(UnknownTemplate) as err:
         desk.template("nope")
-    assert err.value.available == ["tca"]
+    assert err.value.available == ["psy", "tca"]
 
 
 def test_last_is_none_on_empty_desk(desk):

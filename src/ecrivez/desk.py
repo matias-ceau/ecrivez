@@ -11,7 +11,11 @@ from importlib import resources
 from pathlib import Path
 
 DEFAULT_ROOT = "~/.local/share/ecrivez"
-SEEDS = {"trames/tca.md": "trames/tca.md", "regles.md": "regles.md"}
+SEEDS = {
+    "trames/tca.md": "trames/tca.md",
+    "trames/psy.md": "trames/psy.md",
+    "regles.md": "regles.md",
+}
 
 
 class UnknownTemplate(Exception):
