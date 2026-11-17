@@ -19,7 +19,7 @@ Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`
 
 | Élément | Rôle |
 |---|---|
-| `trames/*.md` | Trames de documents (une par fichier) |
+| `trames/*.md` | Trames de documents (une par fichier) ; `tca` et `psy` fournies |
 | `exemples/*.md` | Documents déjà rédigés, modèles de style |
 | `lexique.md` | Termes à reconnaître dans la transcription |
 | `regles.md` | Consignes de style retenues |

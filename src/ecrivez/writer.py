@@ -48,6 +48,10 @@ Règles impératives :
 contexte médical et le lexique (exemple : « craie vin » pour « craving »).
 - N'ajoute aucun fait, aucune interprétation clinique, aucune posologie absents de la source.
 - Une rubrique de la trame que la source n'aborde pas reçoit exactement : Non abordé
+- Si aucune rubrique d'une section de la trame n'est abordée, écris Non abordé une seule fois \
+sous l'intitulé de la section, sans détailler ses rubriques.
+- Les parenthèses de la trame sont un aide-mémoire de ce qu'il faut y chercher : ne les \
+recopie pas et ne signale pas un par un les éléments absents.
 - Un passage douteux ou inaudible que le contexte ne permet pas de trancher est signalé par [?] \
 plutôt que deviné.
 - Les noms de personnes sont repris tels que prononcés.
