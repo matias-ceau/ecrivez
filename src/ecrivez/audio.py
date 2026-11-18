@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -30,10 +31,13 @@ ONLINE_PROMPT = (
     "psychiatrie). N'ajoute rien, ne résume pas, ne commente pas. Distingue les personnes à "
     "leur voix : la première voix est A, la deuxième B ; toute autre voix (téléphone, autre "
     "personne) reçoit la lettre suivante. Écris une ligne par prise de parole, au format "
-    f"exact : A : texte. Un passage incompréhensible est noté {INAUDIBLE}. "
+    "exact : [mm:ss] A : texte (mm:ss = début de la prise de parole). "
+    f"Un passage incompréhensible est noté {INAUDIBLE}. "
     f"Si rien n'est audible, réponds exactement : {INAUDIBLE}"
 )
 CONTEXT_LINES = 8
+TURN_LABEL = re.compile(r"^[A-Z] ?:", re.MULTILINE)
+TURN_TIME = re.compile(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", re.MULTILINE)
 CONTINUATION = (
     "\nCet extrait est la suite d'un enregistrement. Voici la fin de la transcription "
     "précédente : garde les mêmes lettres pour les mêmes voix et ne la recopie pas.\n---\n{}\n---"
@@ -163,10 +167,11 @@ def _transcribe_online(
             if "error" in answer or not answer.get("choices"):
                 detail = (answer.get("error") or {}).get("message") or "réponse vide"
                 raise ToolError(ONLINE, str(detail))
-            text = (answer["choices"][0]["message"].get("content") or "").strip()
-            if text.replace(INAUDIBLE, "").strip():
+            raw = (answer["choices"][0]["message"].get("content") or "").strip()
+            text = TURN_TIME.sub("", raw)
+            if TURN_LABEL.sub("", text).replace(INAUDIBLE, "").strip():
                 texts.append(text)
-                previous = "\n".join(text.splitlines()[-CONTEXT_LINES:])
+                previous = "\n".join(raw.splitlines()[-CONTEXT_LINES:])
             else:
                 texts.append(None)
     if not any(texts):

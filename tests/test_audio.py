@@ -221,7 +221,7 @@ def _prompt(fake: FakeOnline, index: int) -> str:
 def test_online_prompt_asks_for_one_labelled_line_per_turn(tmp_path):
     fake = FakeOnline([_answer("A : Bonjour.")])
     transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
-    assert "A : texte" in _prompt(fake, 0)
+    assert "[mm:ss] A : texte" in _prompt(fake, 0)
     assert "une ligne par prise de parole" in _prompt(fake, 0)
 
 
@@ -242,7 +242,9 @@ def test_unlabelled_lines_are_kept(tmp_path):
 
 
 def test_an_inaudible_part_is_marked_and_reported(tmp_path):
-    fake = FakeOnline([_answer("A : Bonjour."), _answer("[inaudible]"), _answer("B : Fin.")])
+    fake = FakeOnline(
+        [_answer("A : Bonjour."), _answer("[00:00] A : [inaudible]"), _answer("B : Fin.")]
+    )
     warnings: list[str] = []
     text = transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post, warnings.append)
     assert text == "A : Bonjour.\n[tranche 2 inaudible]\nB : Fin."
@@ -255,3 +257,12 @@ def test_nothing_is_reported_when_every_part_is_inaudible(tmp_path):
     warnings: list[str] = []
     assert transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post, warnings.append) == ""
     assert warnings == []
+
+
+def test_turn_timestamps_are_removed_from_the_text_but_kept_as_context(tmp_path):
+    fake = FakeOnline(
+        [_answer("[00:00] A : Bonjour.\n[00:04] B : Oui [inaudible]."), _answer("[0:02] A : Fin.")]
+    )
+    text = transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert text == "A : Bonjour.\nB : Oui [inaudible].\nA : Fin."
+    assert "[00:04] B : Oui" in _prompt(fake, 1)
