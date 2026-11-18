@@ -212,3 +212,46 @@ def test_forcing_online_without_any_key_is_a_clear_error(tmp_path):
     with pytest.raises(ToolError) as err:
         transcribe(tmp_path / "a.flac", "", {"ECRIVEZ_TRANSCRIBER": "online"}, fake.run, fake.post)
     assert "OPENROUTER_API_KEY" in str(err.value)
+
+
+def _prompt(fake: FakeOnline, index: int) -> str:
+    return fake.posts[index][2]["messages"][0]["content"][0]["text"]
+
+
+def test_online_prompt_asks_for_one_labelled_line_per_turn(tmp_path):
+    fake = FakeOnline([_answer("A : Bonjour.")])
+    transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert "A : texte" in _prompt(fake, 0)
+    assert "une ligne par prise de parole" in _prompt(fake, 0)
+
+
+def test_later_parts_receive_the_last_eight_lines_of_the_previous_one(tmp_path):
+    first = "\n".join(f"A : ligne {i}" for i in range(1, 11))
+    fake = FakeOnline([_answer(first), _answer("B : suite")])
+    transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert "ligne 1" not in _prompt(fake, 0) and "suite d'un enregistrement" not in _prompt(fake, 0)
+    assert "A : ligne 3\n" in _prompt(fake, 1) and "A : ligne 10" in _prompt(fake, 1)
+    assert "A : ligne 2\n" not in _prompt(fake, 1)
+    assert "mêmes lettres" in _prompt(fake, 1)
+
+
+def test_unlabelled_lines_are_kept(tmp_path):
+    fake = FakeOnline([_answer("A : Bonjour.\nsans étiquette"), _answer("B : Oui.")])
+    text = transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post)
+    assert text == "A : Bonjour.\nsans étiquette\nB : Oui."
+
+
+def test_an_inaudible_part_is_marked_and_reported(tmp_path):
+    fake = FakeOnline([_answer("A : Bonjour."), _answer("[inaudible]"), _answer("B : Fin.")])
+    warnings: list[str] = []
+    text = transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post, warnings.append)
+    assert text == "A : Bonjour.\n[tranche 2 inaudible]\nB : Fin."
+    assert len(warnings) == 1 and "2" in warnings[0]
+    assert "A : Bonjour." in _prompt(fake, 2)
+
+
+def test_nothing_is_reported_when_every_part_is_inaudible(tmp_path):
+    fake = FakeOnline([_answer("[inaudible]"), _answer("[inaudible]")])
+    warnings: list[str] = []
+    assert transcribe(tmp_path / "a.flac", "", ONLINE, fake.run, fake.post, warnings.append) == ""
+    assert warnings == []

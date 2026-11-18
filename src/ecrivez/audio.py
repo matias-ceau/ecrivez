@@ -27,9 +27,16 @@ PART_SECONDS = 600
 INAUDIBLE = "[inaudible]"
 ONLINE_PROMPT = (
     "Transcris mot à mot cet enregistrement en français (consultation ou dictée médicale, "
-    "psychiatrie). N'ajoute rien, ne résume pas, ne commente pas. Va à la ligne à chaque "
-    f"changement de locuteur. Un passage incompréhensible est noté {INAUDIBLE}. "
+    "psychiatrie). N'ajoute rien, ne résume pas, ne commente pas. Distingue les personnes à "
+    "leur voix : la première voix est A, la deuxième B ; toute autre voix (téléphone, autre "
+    "personne) reçoit la lettre suivante. Écris une ligne par prise de parole, au format "
+    f"exact : A : texte. Un passage incompréhensible est noté {INAUDIBLE}. "
     f"Si rien n'est audible, réponds exactement : {INAUDIBLE}"
+)
+CONTEXT_LINES = 8
+CONTINUATION = (
+    "\nCet extrait est la suite d'un enregistrement. Voici la fin de la transcription "
+    "précédente : garde les mêmes lettres pour les mêmes voix et ne la recopie pas.\n---\n{}\n---"
 )
 
 
@@ -98,6 +105,11 @@ def post_json(url: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 Post = Callable[[str, str, dict[str, Any]], dict[str, Any]]
+Warn = Callable[[str], None]
+
+
+def _silent(_: str) -> None:
+    pass
 
 
 def _transcribe_local(audio: Path, hint: str, env: Mapping[str, str], run: Run) -> str:
@@ -119,11 +131,14 @@ def _account(env: Mapping[str, str]) -> tuple[str, str]:
     return (env.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"), env["OPENAI_API_KEY"]
 
 
-def _transcribe_online(audio: Path, hint: str, env: Mapping[str, str], run: Run, post: Post) -> str:
+def _transcribe_online(
+    audio: Path, hint: str, env: Mapping[str, str], run: Run, post: Post, warn: Warn
+) -> str:
     base, key = _account(env)
     model = env.get("ECRIVEZ_AUDIO_MODEL") or DEFAULT_AUDIO_MODEL
     prompt = ONLINE_PROMPT + (f"\nTermes susceptibles d'apparaître : {hint}" if hint else "")
-    texts: list[str] = []
+    texts: list[str | None] = []
+    previous = ""
     with tempfile.TemporaryDirectory() as tmp:
         argv = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio)]
         argv += ["-ac", "1", "-ar", "16000", "-b:a", "48k"]
@@ -132,7 +147,10 @@ def _transcribe_online(audio: Path, hint: str, env: Mapping[str, str], run: Run,
         for part in sorted(Path(tmp).glob("part*.mp3")):
             sound = {"data": base64.b64encode(part.read_bytes()).decode(), "format": "mp3"}
             content = [
-                {"type": "text", "text": prompt},
+                {
+                    "type": "text",
+                    "text": prompt + (CONTINUATION.format(previous) if previous else ""),
+                },
                 {"type": "input_audio", "input_audio": sound},
             ]
             payload = {
@@ -148,7 +166,15 @@ def _transcribe_online(audio: Path, hint: str, env: Mapping[str, str], run: Run,
             text = (answer["choices"][0]["message"].get("content") or "").strip()
             if text.replace(INAUDIBLE, "").strip():
                 texts.append(text)
-    return "\n".join(texts)
+                previous = "\n".join(text.splitlines()[-CONTEXT_LINES:])
+            else:
+                texts.append(None)
+    if not any(texts):
+        return ""
+    for number, text in enumerate(texts, 1):
+        if text is None:
+            warn(f"  Attention : tranche {number} inaudible (10 minutes sans rien de transcrit)")
+    return "\n".join(t or f"[tranche {n} inaudible]" for n, t in enumerate(texts, 1))
 
 
 def transcribe(
@@ -157,6 +183,7 @@ def transcribe(
     env: Mapping[str, str] = os.environ,
     run: Run = run_tool,
     post: Post = post_json,
+    warn: Warn = _silent,
 ) -> str:
     """Online when an API key is set (or forced), local Whisper otherwise."""
     has_key = bool(env.get("OPENROUTER_API_KEY") or env.get("OPENAI_API_KEY"))
@@ -165,4 +192,4 @@ def transcribe(
         return _transcribe_local(audio, hint, env, run)
     if not has_key:
         raise ToolError(ONLINE, "variable OPENROUTER_API_KEY absente")
-    return _transcribe_online(audio, hint, env, run, post)
+    return _transcribe_online(audio, hint, env, run, post, warn)
