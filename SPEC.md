@@ -78,6 +78,8 @@ Le repo ne contient que le code et une trame TCA d'exemple vide.
 2. Transcription : en ligne par défaut dès qu'une clé API est dans l'environnement
    (OpenRouter, modèle audio `google/gemini-4-hydrogen`, tranches de 10 minutes) ;
    sinon Whisper en local. Le lexique sert d'amorce dans les deux cas.
+   En ligne, chaque prise de parole sort sur une ligne étiquetée par voix (`A : …`,
+   `B : …`) ; détail dans `docs/superpowers/specs/2026-11-17-speakers.md`.
 3. Rédaction : `claude -p`, qui reçoit trame, exemples, lexique, règles et
    transcription, corrige les erreurs de transcription d'après le contexte, puis rédige.
 4. Sortie : fichier `.txt` dans `sorties/`, terminal et presse-papiers (`wl-copy`).

@@ -242,3 +242,17 @@ def test_clipboard_missing_program_raises_tool_error(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))
     with pytest.raises(ToolError):
         copy_to_clipboard("note")
+
+
+def test_transcription_warnings_are_shown(tmp_path, monkeypatch):
+    world = World(tmp_path)
+
+    def heard(sound, hint, env, run, warn):
+        warn("tranche 2 inaudible")
+        return "A : Bonjour.\n[tranche 2 inaudible]"
+
+    monkeypatch.setattr("ecrivez.cli.audio.transcribe", heard)
+    vocal = tmp_path / "vocal.m4a"
+    vocal.write_bytes(b"audio")
+    assert main(["fichier", str(vocal), "tca"], world.deps()) == 0
+    assert any("tranche 2 inaudible" in e for e in world.errors)

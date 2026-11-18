@@ -89,3 +89,11 @@ def test_revise_sends_previous_source_note_and_remark(desk):
     stdin = run.calls[0][1] or ""
     assert "la source" in stdin and "ancienne note" in stdin and "craving, pas craie vin" in stdin
     assert "===MEMOIRE===" in run.system
+
+
+def test_draft_prompt_explains_speaker_letters(desk):
+    run = FakeRun("note")
+    draft(desk, "A : Bonjour.\nB : Bonjour docteur.", "tca", run)
+    assert "lettres en début de ligne" in run.system
+    assert "qui est le médecin" in run.system
+    assert "autre patient" in run.system

@@ -55,6 +55,9 @@ recopie pas et ne signale pas un par un les éléments absents.
 - Un passage douteux ou inaudible que le contexte ne permet pas de trancher est signalé par [?] \
 plutôt que deviné.
 - Les noms de personnes sont repris tels que prononcés.
+- Dans une transcription, les lettres en début de ligne (A, B, C…) désignent les voix de \
+l'enregistrement. Déduis du contenu qui est le médecin. Une autre lettre peut être un tiers \
+(appel téléphonique, accompagnant). Ce qui concerne un autre patient est ignoré.
 - Les propos familiers du médecin sont reformulés en langage médical ; ses raisonnements \
 cliniques sont conservés.
 - Texte brut uniquement : pas de Markdown, pas de dièses, pas d'astérisques, pas de tableaux.

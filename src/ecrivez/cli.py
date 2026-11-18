@@ -125,7 +125,8 @@ def _write(desk: Desk, source: str, template: str | None, folder: Path, d: Deps)
 def _from_audio(desk: Desk, sound: Path, template: str | None, folder: Path, d: Deps) -> None:
     d.out("  Transcription…")
     try:
-        heard = audio.transcribe(sound, audio.hint_from_lexicon(desk.lexicon()), d.env, d.run)
+        hint = audio.hint_from_lexicon(desk.lexicon())
+        heard = audio.transcribe(sound, hint, d.env, d.run, warn=d.err)
     except ToolError as e:
         raise Stop(f"Erreur : {e}. L'audio est conservé : {sound}") from None
     if not heard.strip():
