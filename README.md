@@ -27,6 +27,20 @@ de réseau ne coupe pas l'enregistrement, la transcription réessaie seule.
 Le Python fourni par `uv` a un Tk sans polices modernes : installer avec celui du système,
 `uv tool install --python /usr/bin/python3 -e .` (paquet `tk`).
 
+## Téléphone (`ecrivez-web`)
+
+Une page web privée, installable sur l'écran d'accueil du téléphone : enregistrer (l'audio
+part à la maison toutes les cinq secondes et reste dans le téléphone tant qu'il n'est pas
+confirmé), ou envoyer un fichier du dictaphone ; puis transcription, note, copie, mail.
+Le serveur n'écoute que sur `127.0.0.1` ; on l'expose au seul réseau Tailscale :
+
+```
+ecrivez-web --port 8377
+tailscale serve --bg --https=8443 http://127.0.0.1:8377
+```
+
+Détails et cas limites : [spec](docs/superpowers/specs/2026-11-19-mobile.md).
+
 ## Dossier de données
 
 Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`.

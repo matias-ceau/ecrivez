@@ -1,0 +1,634 @@
+"""The phone web app: a private page that records, sends audio home and shows the note.
+
+See docs/superpowers/specs/2026-11-19-mobile.md. The phone sends short chunks of audio;
+the server appends them to the part being recorded, and each closed part goes through the
+same transcription and assembly as a session recorded on the computer (`live.py`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import parse_qs, urlsplit
+
+from ecrivez import audio, live, mail, writer
+from ecrivez.cli import _current_template
+from ecrivez.desk import Desk, UnknownTemplate, open_desk
+from ecrivez.writer import Run, ToolError, run_tool
+
+DEFAULT_PORT = 8377
+STATE = "web.json"
+SESSION_ID = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{6}(?:-\d+)?)$")
+CHUNK_FORMATS = ("webm", "ogg", "m4a")
+UPLOAD_FORMATS = ("mp3", "m4a", "mp4", "aac", "wav", "ogg", "opus", "flac", "webm", "amr", "3gp")
+MAX_CHUNK = 8 * 1024 * 1024
+MAX_UPLOAD = 1024 * 1024 * 1024
+TEXT_HEADING = "Texte joint par le médecin :"
+TRANSCRIPT_HEADING = "Transcription de la consultation :"
+
+# Phases of a session, kept in web.json:
+#   nouvelle   opened, nothing received yet
+#   active     the phone is sending audio
+#   pause      nothing received for a while: everything is transcribed, more is still accepted
+#   decoupage  an uploaded file is being cut into parts
+#   close      no more audio will come (transcription and assembly may still be running)
+
+
+class Readable(Protocol):
+    def read(self, size: int, /) -> bytes: ...
+
+
+class _Body:
+    """The request body, counted, so that what a refusal left unread can be discarded."""
+
+    def __init__(self, source: Readable, length: int) -> None:
+        self.source = source
+        self.remaining = length
+
+    def read(self, size: int, /) -> bytes:
+        block = self.source.read(min(size, self.remaining)) if self.remaining > 0 else b""
+        self.remaining -= len(block)
+        return block
+
+    def drain(self) -> None:
+        while self.read(1 << 20):
+            pass
+
+
+class Refused(Exception):
+    """A request the server will not carry out, worded for the doctor."""
+
+    def __init__(self, status: int, message: str, **extra: Any) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.extra = extra
+
+
+@dataclass
+class _Running:
+    """What this process holds in memory for one session."""
+
+    session: live.Session
+    recording: threading.Event = field(default_factory=threading.Event)
+    hold: threading.Event = field(default_factory=threading.Event)
+    worker: live.Worker | None = None
+    threads: list[threading.Thread] = field(default_factory=list)
+    message: str = ""
+    drafting: bool = False
+
+
+Draft = Callable[[Desk, str, str | None], str]
+
+
+class Studio:
+    def __init__(
+        self,
+        desk: Desk,
+        transcriber: Callable[[], live.TranscribePart],
+        run: Run = run_tool,
+        draft: Draft = writer.draft,
+        send: Callable[[str], object] = mail.send,
+        clock: Callable[[], float] = time.time,
+        part_seconds: int = live.PART_SECONDS,
+        idle_pause: float = 600,
+        idle_close: float = 12 * 3600,
+        retry: float = live.RETRY_SECONDS,
+        poll: float = 1.0,
+    ) -> None:
+        self.desk = desk
+        self.transcriber = transcriber
+        self.run = run
+        self.draft = draft
+        self.send = send
+        self.clock = clock
+        self.part_seconds = part_seconds
+        self.idle_pause = idle_pause
+        self.idle_close = idle_close
+        self.retry = retry
+        self.poll = poll
+        self._mutex = threading.RLock()
+        self._running: dict[str, _Running] = {}
+
+    # -- sessions on disk --------------------------------------------------------------
+
+    def _folder(self, sid: str) -> Path:
+        match = SESSION_ID.match(sid)
+        folder = self.desk.root / "sorties" / match[1] / match[2] if match else None
+        if folder is None or not folder.is_dir():
+            raise Refused(404, "Séance introuvable.")
+        return folder
+
+    @staticmethod
+    def _sid(folder: Path) -> str:
+        return f"{folder.parent.name}_{folder.name}"
+
+    @staticmethod
+    def _load(folder: Path) -> dict[str, Any]:
+        meta = {"phase": "close", "tranche": -1, "rang": -1, "taille": 0, "vu": 0.0}
+        try:
+            meta.update(json.loads((folder / STATE).read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        return meta
+
+    @staticmethod
+    def _store(folder: Path, meta: dict[str, Any]) -> None:
+        live._write_atomic(folder / STATE, json.dumps(meta))
+
+    def _of(self, sid: str, folder: Path) -> _Running:
+        if sid not in self._running:
+            self._running[sid] = _Running(live.Session(folder))
+        return self._running[sid]
+
+    def _work(self, sid: str, running: _Running) -> None:
+        """Make sure a worker is transcribing this session."""
+        if running.worker is not None and not running.worker.done.is_set():
+            return
+
+        def notify(message: str) -> None:
+            running.message = message
+
+        running.session.take()
+        running.worker = live.Worker(
+            running.session,
+            self.transcriber(),
+            notify,
+            running.recording,
+            run=self.run,
+            retry=self.retry,
+            poll=self.poll,
+            hold=running.hold,
+        )
+        running.worker.start()
+
+    # -- recording ---------------------------------------------------------------------
+
+    def create(self) -> str:
+        folder = self.desk.new_output_dir()
+        with self._mutex:
+            self._store(folder, {**self._load(folder), "phase": "nouvelle", "vu": self.clock()})
+        return self._sid(folder)
+
+    def chunk(self, sid: str, tranche: int, rang: int, data: bytes, ext: str = "webm") -> str:
+        """Append one chunk of audio. Returns "recu", or "deja" for a chunk sent twice."""
+        if ext not in CHUNK_FORMATS:
+            raise Refused(400, "Format audio non pris en charge.")
+        with self._mutex:
+            folder = self._folder(sid)
+            meta = self._load(folder)
+            if meta["phase"] in ("close", "decoupage"):
+                raise Refused(409, "Cette séance est close.")
+            last, rank = meta["tranche"], meta["rang"]
+            if tranche < last or (tranche == last and rang <= rank):
+                return "deja"
+            follows = tranche == last and rang == rank + 1
+            if not follows and not (tranche > last and rang == 0):
+                expected = {"tranche": max(last, 0), "rang": rank + 1 if last >= 0 else 0}
+                raise Refused(409, "Morceau en avance.", attendu=expected)
+
+            running = self._of(sid, folder)
+            running.session.parts_dir.mkdir(exist_ok=True)
+            part = running.session.parts_dir / f"part{tranche:03d}.{ext}"
+            with part.open("r+b" if follows and part.exists() else "wb") as f:
+                if follows:
+                    f.truncate(meta["taille"])  # drop bytes written but never recorded
+                    f.seek(0, os.SEEK_END)
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+                size = f.tell()
+            for stale in (".txt", ".ctx"):  # transcribed during a pause: do it again
+                part.with_suffix(stale).unlink(missing_ok=True)
+            meta.update(phase="active", tranche=tranche, rang=rang, taille=size, vu=self.clock())
+            self._store(folder, meta)
+            running.recording.set()
+            running.hold.set()
+            self._work(sid, running)
+        return "recu"
+
+    def finish(self, sid: str) -> None:
+        with self._mutex:
+            folder = self._folder(sid)
+            meta = self._load(folder)
+            if meta["phase"] not in ("active", "pause", "nouvelle"):
+                return
+            had_audio = meta["phase"] != "nouvelle"
+            meta["phase"] = "close"
+            self._store(folder, meta)
+            if had_audio:
+                running = self._of(sid, folder)
+                running.recording.clear()
+                running.hold.clear()
+                self._work(sid, running)
+
+    def sweep(self) -> None:
+        """Pause sessions whose phone went silent; close for good those paused too long."""
+        with self._mutex:
+            for sid, running in list(self._running.items()):
+                folder = running.session.folder
+                meta = self._load(folder)
+                silent = self.clock() - meta["vu"]
+                if meta["phase"] == "active" and silent > self.idle_pause:
+                    meta["phase"] = "pause"
+                    self._store(folder, meta)
+                    running.recording.clear()  # the last part gets transcribed, nothing assembled
+                elif meta["phase"] == "pause" and silent > self.idle_close:
+                    self.finish(sid)
+
+    def resume(self) -> None:
+        """After a restart: pick every unfinished session up where it was."""
+        with self._mutex:
+            for state in sorted((self.desk.root / "sorties").glob(f"*/*/{STATE}")):
+                folder = state.parent
+                sid, meta = self._sid(folder), self._load(folder)
+                if live.Session(folder).busy():
+                    continue
+                if meta["phase"] in ("active", "pause"):
+                    running = self._of(sid, folder)
+                    running.hold.set()
+                    if meta["phase"] == "active":
+                        running.recording.set()
+                        self._store(folder, {**meta, "vu": self.clock()})
+                    self._work(sid, running)
+                elif meta["phase"] == "decoupage":
+                    self._cut_later(sid, folder)
+            for session in live.unfinished_sessions(self.desk.root):
+                sid = self._sid(session.folder)
+                if sid not in self._running:
+                    self._work(sid, self._of(sid, session.folder))
+
+    # -- sending a file ----------------------------------------------------------------
+
+    def upload(self, sid: str, source: Readable, length: int, name: str) -> None:
+        ext = Path(name).suffix.lower().lstrip(".")
+        if ext not in UPLOAD_FORMATS:
+            raise Refused(400, "Ce fichier n'est pas un enregistrement audio reconnu.")
+        with self._mutex:
+            folder = self._folder(sid)
+            meta = self._load(folder)
+            if meta["phase"] != "nouvelle":
+                raise Refused(409, "Cette séance a déjà un enregistrement.")
+            self._store(folder, {**meta, "phase": "decoupage"})
+        original = folder / f"original.{ext}"
+        with original.open("wb") as f:
+            remaining = length
+            while remaining > 0:
+                block = source.read(min(remaining, 1 << 20))
+                if not block:
+                    break
+                f.write(block)
+                remaining -= len(block)
+            f.flush()
+            os.fsync(f.fileno())
+        with self._mutex:
+            self._cut_later(sid, folder)
+
+    def _cut_later(self, sid: str, folder: Path) -> None:
+        running = self._of(sid, folder)
+        thread = threading.Thread(target=self._cut, args=(sid, folder, running), daemon=True)
+        running.threads.append(thread)
+        thread.start()
+
+    def _cut(self, sid: str, folder: Path, running: _Running) -> None:
+        """Cut the uploaded file into parts; they appear all at once, never half done."""
+        original = next(iter(sorted(folder.glob("original.*"))), None)
+        tmp = folder / "decoupe"
+        shutil.rmtree(tmp, ignore_errors=True)
+        error = None
+        try:
+            if original is None:
+                raise ToolError("ffmpeg", "fichier absent")
+            tmp.mkdir()
+            argv = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(original)]
+            argv += ["-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "segment"]
+            argv += ["-segment_time", str(self.part_seconds), str(tmp / "part%03d.flac")]
+            self.run(argv, None)
+            if not any(tmp.iterdir()):
+                raise ToolError("ffmpeg", "aucun son dans le fichier")
+            tmp.rename(running.session.parts_dir)
+        except (ToolError, OSError) as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            error = f"Fichier audio illisible ({e}). Il est conservé dans la séance."
+        with self._mutex:
+            meta = {**self._load(folder), "phase": "close"}
+            if error:
+                meta["erreur"] = error
+            self._store(folder, meta)
+            if not error:
+                self._work(sid, running)
+
+    # -- reading -----------------------------------------------------------------------
+
+    def _etat(self, folder: Path, meta: dict[str, Any]) -> str:
+        if meta["phase"] == "active":
+            return "enregistrement"
+        if meta["phase"] == "pause":
+            return "pause"
+        if meta["phase"] == "decoupage" or (folder / live.PARTS).exists():
+            return "transcription"
+        kept = ("audio.flac", live.TRANSCRIPT, "note.txt")
+        if any((folder / name).exists() for name in kept) or any(folder.glob("original.*")):
+            return "terminee"
+        return "nouvelle"
+
+    @staticmethod
+    def _note(folder: Path) -> str | None:
+        path = folder / "note.txt"
+        return path.read_text(encoding="utf-8").strip() if path.exists() else None
+
+    def state(self, sid: str) -> dict[str, Any]:
+        with self._mutex:
+            folder = self._folder(sid)
+            meta = self._load(folder)
+            session = live.Session(folder)
+            running = self._running.get(sid)
+            return {
+                "id": sid,
+                "etat": self._etat(folder, meta),
+                "transcription": session.transcript(),
+                "tranches": len(session.parts()),
+                "transcrites": len(session.texts()),
+                "note": self._note(folder),
+                "redaction": bool(running and running.drafting),
+                "erreur": meta.get("erreur"),
+                "message": running.message if running else "",
+            }
+
+    def today(self) -> dict[str, Any]:
+        day = self.desk.root / "sorties" / datetime.now().strftime("%Y-%m-%d")
+        sessions = []
+        with self._mutex:
+            for folder in sorted(p for p in day.glob("*") if p.is_dir()):
+                etat = self._etat(folder, self._load(folder))
+                if etat == "nouvelle":
+                    continue
+                hour = folder.name
+                sessions.append(
+                    {
+                        "id": self._sid(folder),
+                        "heure": f"{hour[:2]}:{hour[2:4]}",
+                        "etat": etat,
+                        "note": (folder / "note.txt").exists(),
+                    }
+                )
+        return {
+            "seances": sessions,
+            "trames": self.desk.templates(),
+            "trame": _current_template(self.desk),
+            "duree_tranche": self.part_seconds,
+        }
+
+    # -- the note ----------------------------------------------------------------------
+
+    def start_draft(self, sid: str, template: str | None, text: str) -> None:
+        with self._mutex:
+            folder = self._folder(sid)
+            meta = self._load(folder)
+            session = live.Session(folder)
+            running = self._of(sid, folder)
+            if running.drafting:
+                raise Refused(409, "La rédaction est déjà en cours.")
+            if meta["phase"] in ("active", "decoupage") or session.pending(recording=False):
+                raise Refused(409, "La transcription n'est pas finie.")
+            if template is not None:
+                try:
+                    self.desk.template(template)
+                except UnknownTemplate:
+                    raise Refused(400, f"Trame inconnue : {template}") from None
+            heard, text = session.transcript(), text.strip()
+            if not heard and not text:
+                raise Refused(400, "Rien à rédiger : ni transcription ni texte.")
+            source = heard or text
+            if heard and text:
+                source = f"{TRANSCRIPT_HEADING}\n{heard}\n\n{TEXT_HEADING}\n{text}"
+            running.drafting = True
+            meta.pop("erreur", None)
+            self._store(folder, meta)
+            thread = threading.Thread(
+                target=self._draft, args=(folder, running, source, template), daemon=True
+            )
+            running.threads.append(thread)
+            thread.start()
+
+    def _draft(self, folder: Path, running: _Running, source: str, template: str | None) -> None:
+        error = None
+        try:
+            note = self.draft(self.desk, source, template)
+            self.desk.save(source, note, template, folder)
+        except (ToolError, OSError) as e:
+            error = f"Rédaction impossible : {e}. La transcription et l'audio sont intacts."
+        with self._mutex:
+            if error:
+                self._store(folder, {**self._load(folder), "erreur": error})
+            running.drafting = False
+
+    def send_mail(self, sid: str) -> None:
+        note = self._note(self._folder(sid))
+        if not note:
+            raise Refused(409, "Pas encore de note à envoyer.")
+        try:
+            self.send(note)
+        except ToolError as e:
+            raise Refused(502, f"Envoi impossible : {e}") from None
+
+    # -- life cycle --------------------------------------------------------------------
+
+    def settle(self, sid: str, timeout: float = 10.0) -> None:
+        """Wait until nothing is left to do for this session in its current phase."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._mutex:
+                running = self._running.get(sid)
+                if running is None:
+                    return
+                threads = [t for t in running.threads if t.is_alive()]
+                worker = running.worker
+                idle = (
+                    worker is None
+                    or worker.done.is_set()
+                    or not running.session.pending(recording=running.recording.is_set())
+                )
+                waiting = running.hold.is_set() or running.recording.is_set()
+                if worker is not None and not worker.done.is_set() and not waiting:
+                    idle = False  # it still has to assemble
+            if not threads and idle:
+                return
+            time.sleep(0.01)
+        raise TimeoutError(f"session {sid} still busy after {timeout} s")
+
+    def shutdown(self) -> None:
+        with self._mutex:
+            workers = [r.worker for r in self._running.values() if r.worker is not None]
+            self._running.clear()
+        for worker in workers:
+            worker.stop.set()
+        for worker in workers:
+            worker.join(timeout=5)
+
+
+# -- HTTP ------------------------------------------------------------------------------
+
+STATIC = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/icon-512.png": ("icon-512.png", "image/png"),
+}
+ROUTES = [
+    ("POST", re.compile(r"^/api/seances$"), "create"),
+    ("GET", re.compile(r"^/api/seances$"), "today"),
+    ("GET", re.compile(r"^/api/seances/([^/]+)$"), "state"),
+    ("PUT", re.compile(r"^/api/seances/([^/]+)/tranches/(\d{1,4})/(\d{1,6})$"), "chunk"),
+    ("POST", re.compile(r"^/api/seances/([^/]+)/fin$"), "finish"),
+    ("POST", re.compile(r"^/api/seances/([^/]+)/fichier$"), "upload"),
+    ("POST", re.compile(r"^/api/seances/([^/]+)/note$"), "note"),
+    ("POST", re.compile(r"^/api/seances/([^/]+)/mail$"), "mail"),
+]
+
+
+def make_handler(studio: Studio) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _send(self, status: int, body: bytes, content_type: str) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, status: int, payload: dict[str, Any]) -> None:
+            self._send(status, json.dumps(payload).encode(), "application/json")
+
+        def _length(self, limit: int) -> int:
+            raw = self.headers.get("Content-Length") or "0"
+            length = int(raw) if raw.isdigit() else limit + 1
+            if length > limit:
+                self.close_connection = True
+                raise Refused(413, "Envoi trop volumineux.")
+            return length
+
+        def _dispatch(self, method: str) -> None:
+            url = urlsplit(self.path)
+            query = parse_qs(url.query)
+            if method == "GET" and url.path in STATIC:
+                name, content_type = STATIC[url.path]
+                body = (resources.files("ecrivez") / "resources" / "web" / name).read_bytes()
+                self._send(200, body, content_type)
+                return
+            try:
+                body = _Body(self.rfile, self._length(MAX_UPLOAD))
+            except Refused as e:
+                self._json(e.status, {"erreur": e.message})
+                return
+            status, answer = 404, {"erreur": "Adresse inconnue."}
+            for verb, pattern, action in ROUTES:
+                match = pattern.match(url.path)
+                if verb == method and match:
+                    try:
+                        status, answer = self._act(action, match.groups(), query, body)
+                    except Refused as e:
+                        status, answer = e.status, {"erreur": e.message, **e.extra}
+                    break
+            body.drain()  # keep the connection usable whatever was left unread
+            self._json(status, answer)
+
+        def _act(
+            self, action: str, args: tuple[str, ...], query: dict[str, list[str]], body: _Body
+        ) -> tuple[int, dict[str, Any]]:
+            if action == "upload":
+                name = (query.get("nom") or ["audio"])[0]
+                studio.upload(args[0], body, body.remaining, name)
+                return 202, {"ok": True}
+            if body.remaining > MAX_CHUNK:
+                raise Refused(413, "Envoi trop volumineux.")
+            data = body.read(MAX_CHUNK)
+            if action == "create":
+                return 200, {"id": studio.create()}
+            if action == "today":
+                return 200, studio.today()
+            if action == "state":
+                return 200, studio.state(args[0])
+            if action == "chunk":
+                ext = (query.get("ext") or ["webm"])[0]
+                return 200, {
+                    "resultat": studio.chunk(args[0], int(args[1]), int(args[2]), data, ext)
+                }
+            if action == "finish":
+                studio.finish(args[0])
+                return 200, {"ok": True}
+            if action == "note":
+                try:
+                    asked = json.loads(data or b"{}")
+                    template, text = asked.get("trame") or None, str(asked.get("texte") or "")
+                except (ValueError, AttributeError):
+                    raise Refused(400, "Demande illisible.") from None
+                studio.start_draft(args[0], template, text)
+                return 202, {"ok": True}
+            studio.send_mail(args[0])
+            return 200, {"ok": True}
+
+        def do_GET(self) -> None:
+            self._dispatch("GET")
+
+        def do_POST(self) -> None:
+            self._dispatch("POST")
+
+        def do_PUT(self) -> None:
+            self._dispatch("PUT")
+
+    return Handler
+
+
+def make_server(studio: Studio, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
+    """Loopback only: the page is reached through `tailscale serve`, never directly."""
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(studio))
+    server.daemon_threads = True
+    return server
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="ecrivez-web", description="Ecrivez sur le téléphone.")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    args = parser.parse_args(argv)
+    desk = open_desk()
+
+    def transcriber() -> live.TranscribePart:
+        return live.online_transcriber(audio.hint_from_lexicon(desk.lexicon()))
+
+    studio = Studio(desk, transcriber)
+    studio.resume()
+
+    def sweeper() -> None:
+        while True:
+            time.sleep(30)
+            studio.sweep()
+
+    threading.Thread(target=sweeper, daemon=True).start()
+    server = make_server(studio, args.port)
+    print(f"ecrivez-web : http://127.0.0.1:{args.port} (données : {desk.root})", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        studio.shutdown()
+    return 0
