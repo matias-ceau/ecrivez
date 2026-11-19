@@ -18,7 +18,11 @@ from ecrivez.desk import Desk, open_desk
 from ecrivez.writer import ToolError
 
 FREE = "libre"
-RED = "#c0392b"
+RED = "#D14D41"
+BG = "#100F0F"
+FIELD = "#282726"
+FG = "#CECDC3"
+ACCENT = "#4385BE"
 
 
 class App:
@@ -111,7 +115,7 @@ class App:
         self._worker(session, self.recording)
         self.transcript.delete("1.0", "end")
         self.note.delete("1.0", "end")
-        self.button.config(text="■  Arrêter", fg="black")
+        self.button.config(text="■  Arrêter", fg=FG)
         self.set_status(f"Enregistrement… (dossier {session.folder})")
 
     def stop(self) -> None:
@@ -250,10 +254,41 @@ class App:
         self.root.destroy()
 
 
+def apply_palette(root: tk.Tk) -> None:
+    """Own every colour: Tk reads ~/.Xdefaults raw, where names may be unknown or clash."""
+    for option, value in {
+        "*background": BG,
+        "*foreground": FG,
+        "*selectBackground": ACCENT,
+        "*selectForeground": BG,
+        "*insertBackground": FG,
+        "*activeBackground": FIELD,
+        "*activeForeground": FG,
+        "*highlightBackground": BG,
+        "*highlightColor": ACCENT,
+        "*troughColor": FIELD,
+        "*Text.background": FIELD,
+    }.items():
+        root.option_add(option, value, "interactive")
+    root.configure(background=BG)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure(".", background=BG, foreground=FG, fieldbackground=FIELD, bordercolor=FIELD)
+    style.configure("TButton", background=FIELD, padding=6)
+    style.map("TButton", background=[("active", "#403E3C")], foreground=[("disabled", "#6F6E69")])
+    style.configure("TLabelframe.Label", background=BG, foreground="#878580")
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", FIELD)],
+        foreground=[("readonly", FG)],
+        selectbackground=[("readonly", FIELD)],
+        selectforeground=[("readonly", FG)],
+    )
+
+
 def main() -> int:
     root = tk.Tk()
-    # ~/.Xdefaults is read raw by Tk (its #define colour names are unknown): override.
-    root.option_add("*foreground", "black", "interactive")
+    apply_palette(root)
     App(root, open_desk())
     root.mainloop()
     return 0
