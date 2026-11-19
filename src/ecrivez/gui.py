@@ -10,9 +10,8 @@ import time
 import tkinter as tk
 from collections.abc import Mapping
 from tkinter import messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 
-from ecrivez import audio, live, writer
+from ecrivez import audio, live, mail, writer
 from ecrivez.cli import _current_template, copy_to_clipboard
 from ecrivez.desk import Desk, open_desk
 from ecrivez.writer import ToolError
@@ -45,8 +44,9 @@ class App:
         top = ttk.Frame(root, padding=10)
         top.pack(fill="x")
         self.button = tk.Button(
-            top, text="●  Enregistrer", font=("Sans", 16, "bold"), fg=RED, width=16,
-            command=self.toggle,
+            top, text="●  Enregistrer", font=("Sans", 16, "bold"), fg=RED, width=14,
+            command=self.toggle, relief="flat", background=FIELD, borderwidth=0, pady=6,
+            highlightthickness=0,
         )  # fmt: skip
         self.button.pack(side="left")
         self.clock = ttk.Label(top, text="00:00", font=("Sans", 20))
@@ -61,23 +61,21 @@ class App:
         self.status = ttk.Label(root, text="Prêt.", padding=(10, 0), wraplength=720)
         self.status.pack(fill="x")
 
-        panes = ttk.PanedWindow(root, orient="vertical")
-        panes.pack(fill="both", expand=True, padx=10, pady=6)
-        frame_t = ttk.Labelframe(panes, text="Transcription (modifiable)")
-        self.transcript = ScrolledText(frame_t, wrap="word", height=12, font=("Sans", 11))
-        self.transcript.pack(fill="both", expand=True)
-        frame_n = ttk.Labelframe(panes, text="Note")
-        self.note = ScrolledText(frame_n, wrap="word", height=10, font=("Sans", 11))
-        self.note.pack(fill="both", expand=True)
-        panes.add(frame_t, weight=3)
-        panes.add(frame_n, weight=2)
-
         bottom = ttk.Frame(root, padding=10)
-        bottom.pack(fill="x")
+        bottom.pack(side="bottom", fill="x")  # packed first: never squeezed out
         self.draft_button = ttk.Button(bottom, text="Rédiger la note", command=self.draft)
         self.draft_button.pack(side="left")
         ttk.Button(bottom, text="Copier la note", command=self.copy).pack(side="left", padx=6)
-        ttk.Button(bottom, text="Ouvrir le dossier", command=self.open_folder).pack(side="left")
+        self.mail_button = ttk.Button(bottom, text="Envoyer par mail", command=self.send_mail)
+        self.mail_button.pack(side="left")
+        ttk.Button(bottom, text="Ouvrir le dossier", command=self.open_folder).pack(side="right")
+
+        panes = ttk.PanedWindow(root, orient="vertical")
+        panes.pack(fill="both", expand=True, padx=10, pady=6)
+        frame_t, self.transcript = text_area(panes, "Transcription (modifiable)", 12)
+        frame_n, self.note = text_area(panes, "Note", 10)
+        panes.add(frame_t, weight=3)
+        panes.add(frame_n, weight=2)
 
         self.resume()
         root.after(300, self.tick)
@@ -179,6 +177,10 @@ class App:
             except ToolError:
                 self.set_status("Note rédigée.")
             return
+        if kind == "mail":
+            self.mail_button.config(state="normal")
+            self.set_status(message)
+            return
         if kind == "error":
             self.drafting = False
             self.draft_button.config(state="normal")
@@ -233,6 +235,23 @@ class App:
             except ToolError as e:
                 self.set_status(str(e))
 
+    def send_mail(self) -> None:
+        text = self.note.get("1.0", "end").strip()
+        if not text:
+            self.set_status("Pas de note à envoyer.")
+            return
+        self.mail_button.config(state="disabled")
+        self.set_status("Envoi du mail…")
+
+        def work() -> None:
+            try:
+                mail.send(text, self.env)
+                self.events.put((None, "mail", "Note envoyée par mail."))
+            except ToolError as e:
+                self.events.put((None, "mail", f"Envoi impossible : {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def open_folder(self) -> None:
         folder = self.session.folder if self.session else self.desk.root / "sorties"
         subprocess.Popen(
@@ -252,6 +271,19 @@ class App:
         ):
             return
         self.root.destroy()
+
+
+def text_area(parent: tk.Misc, title: str, height: int) -> tuple[ttk.Labelframe, tk.Text]:
+    frame = ttk.Labelframe(parent, text=title)
+    text = tk.Text(
+        frame, wrap="word", height=height, font=("Sans", 11), relief="flat", borderwidth=0,
+        padx=8, pady=6, highlightthickness=0, undo=True,
+    )  # fmt: skip
+    bar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=bar.set)
+    bar.pack(side="right", fill="y")
+    text.pack(side="left", fill="both", expand=True)
+    return frame, text
 
 
 def apply_palette(root: tk.Tk) -> None:
@@ -276,6 +308,13 @@ def apply_palette(root: tk.Tk) -> None:
     style.configure(".", background=BG, foreground=FG, fieldbackground=FIELD, bordercolor=FIELD)
     style.configure("TButton", background=FIELD, padding=6)
     style.map("TButton", background=[("active", "#403E3C")], foreground=[("disabled", "#6F6E69")])
+    style.configure("TLabelframe", bordercolor=FIELD, lightcolor=BG, darkcolor=BG)
+    style.configure(
+        "TScrollbar", background=FIELD, troughcolor=BG, arrowcolor=FG, bordercolor=BG,
+        lightcolor=FIELD, darkcolor=FIELD,
+    )  # fmt: skip
+    style.map("TScrollbar", background=[("active", "#403E3C")])
+    style.configure("TCombobox", arrowcolor=FG, lightcolor=FIELD, darkcolor=FIELD)
     style.configure("TLabelframe.Label", background=BG, foreground="#878580")
     style.map(
         "TCombobox",

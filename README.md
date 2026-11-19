@@ -21,6 +21,12 @@ consultation. Si l'ordinateur s'arrête, on perd au plus quelques secondes ; la 
 interrompue est reprise (transcription puis assemblage) au lancement suivant. Une panne
 de réseau ne coupe pas l'enregistrement, la transcription réessaie seule.
 
+« Envoyer par mail » passe la note à la commande `ECRIVEZ_MAIL_COMMAND` (défaut
+`send_email.py`), appelée avec `-s <objet> -c <note>` ; l'objet ne contient que la date.
+
+Le Python fourni par `uv` a un Tk sans polices modernes : installer avec celui du système,
+`uv tool install --python /usr/bin/python3 -e .` (paquet `tk`).
+
 ## Dossier de données
 
 Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`.
