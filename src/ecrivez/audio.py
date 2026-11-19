@@ -135,12 +135,50 @@ def _account(env: Mapping[str, str]) -> tuple[str, str]:
     return (env.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"), env["OPENAI_API_KEY"]
 
 
+def online_prompt(hint: str) -> str:
+    return ONLINE_PROMPT + (f"\nTermes susceptibles d'apparaître : {hint}" if hint else "")
+
+
+def transcribe_part(
+    part: Path, prompt: str, previous: str, env: Mapping[str, str], post: Post = post_json
+) -> tuple[str | None, str]:
+    """One mp3 part to (text, raw answer); text is None when nothing in it is audible."""
+    base, key = _account(env)
+    model = env.get("ECRIVEZ_AUDIO_MODEL") or DEFAULT_AUDIO_MODEL
+    sound = {"data": base64.b64encode(part.read_bytes()).decode(), "format": "mp3"}
+    content = [
+        {"type": "text", "text": prompt + (CONTINUATION.format(previous) if previous else "")},
+        {"type": "input_audio", "input_audio": sound},
+    ]
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "reasoning": {"effort": "minimal"},
+        "messages": [{"role": "user", "content": content}],
+    }
+    answer = post(f"{base}/chat/completions", key, payload)
+    if "error" in answer or not answer.get("choices"):
+        detail = (answer.get("error") or {}).get("message") or "réponse vide"
+        raise ToolError(ONLINE, str(detail))
+    raw = (answer["choices"][0]["message"].get("content") or "").strip()
+    text = TURN_TIME.sub("", raw)
+    heard = TURN_LABEL.sub("", text).replace(INAUDIBLE, "").strip()
+    return (text if heard else None), raw
+
+
+def context_of(text: str) -> str:
+    return "\n".join(text.splitlines()[-CONTEXT_LINES:])
+
+
+def to_mp3(src: Path, dest: Path, run: Run = run_tool) -> None:
+    argv = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src)]
+    run([*argv, "-ac", "1", "-ar", "16000", "-b:a", "48k", str(dest)], None)
+
+
 def _transcribe_online(
     audio: Path, hint: str, env: Mapping[str, str], run: Run, post: Post, warn: Warn
 ) -> str:
-    base, key = _account(env)
-    model = env.get("ECRIVEZ_AUDIO_MODEL") or DEFAULT_AUDIO_MODEL
-    prompt = ONLINE_PROMPT + (f"\nTermes susceptibles d'apparaître : {hint}" if hint else "")
+    prompt = online_prompt(hint)
     texts: list[str | None] = []
     previous = ""
     with tempfile.TemporaryDirectory() as tmp:
@@ -149,31 +187,10 @@ def _transcribe_online(
         argv += ["-f", "segment", "-segment_time", str(PART_SECONDS), f"{tmp}/part%03d.mp3"]
         run(argv, None)
         for part in sorted(Path(tmp).glob("part*.mp3")):
-            sound = {"data": base64.b64encode(part.read_bytes()).decode(), "format": "mp3"}
-            content = [
-                {
-                    "type": "text",
-                    "text": prompt + (CONTINUATION.format(previous) if previous else ""),
-                },
-                {"type": "input_audio", "input_audio": sound},
-            ]
-            payload = {
-                "model": model,
-                "temperature": 0,
-                "reasoning": {"effort": "minimal"},
-                "messages": [{"role": "user", "content": content}],
-            }
-            answer = post(f"{base}/chat/completions", key, payload)
-            if "error" in answer or not answer.get("choices"):
-                detail = (answer.get("error") or {}).get("message") or "réponse vide"
-                raise ToolError(ONLINE, str(detail))
-            raw = (answer["choices"][0]["message"].get("content") or "").strip()
-            text = TURN_TIME.sub("", raw)
-            if TURN_LABEL.sub("", text).replace(INAUDIBLE, "").strip():
-                texts.append(text)
-                previous = "\n".join(raw.splitlines()[-CONTEXT_LINES:])
-            else:
-                texts.append(None)
+            text, raw = transcribe_part(part, prompt, previous, env, post)
+            texts.append(text)
+            if text is not None:
+                previous = context_of(raw)
     if not any(texts):
         return ""
     for number, text in enumerate(texts, 1):

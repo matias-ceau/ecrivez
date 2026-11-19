@@ -9,6 +9,7 @@ dependencies = []
 
 [project.scripts]
 ecrivez = "ecrivez.cli:main"
+ecrivez-gui = "ecrivez.gui:main"
 
 [tool.hatch.version]
 path = "src/ecrivez/__init__.py"
