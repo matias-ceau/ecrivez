@@ -130,6 +130,7 @@ async function pump() {
                         {method: "PUT", body: v.blob});
       } catch (e) { break; }                       // no network: try again later
       if (answer.status >= 500) break;             // server trouble: try again later
+      if (answer.status === 401 || answer.status === 429) { locked = true; break; }  // keep it
       await dequeue(item.key);                     // accepted, or can never be accepted
     }
   } finally {
@@ -226,8 +227,13 @@ addEventListener("beforeunload", e => { if (recording) e.preventDefault(); });
 
 // -- talking to the server ----------------------------------------------------------
 
+let locked = false;                       // the access code is asked again: nothing is dropped
 async function api(method, path, body) {
   const answer = await fetch(path, {method, body});
+  if (answer.status === 401) {
+    locked = true;
+    if (!recording) location.reload();    // shows the access code page
+  }
   const data = await answer.json();
   if (!answer.ok) throw new Error(data.erreur || `Erreur ${answer.status}`);
   return data;
@@ -306,10 +312,11 @@ function render() {
     $("transcript").textContent = "";
     $("note").textContent = "";
   }
+  if (locked) text = "Code d'accès redemandé. " + (recording ? "L'enregistrement continue ; arrêtez puis rouvrez la page, l'audio partira ensuite." : "");
   if (offline) text = "Serveur injoignable. " + (recording ? "L'enregistrement continue, l'audio partira au retour du réseau." : "");
   const status = $("status");
   status.textContent = alertText || text;
-  status.className = alertText || (s && s.erreur) || offline ? "alert" : "";
+  status.className = alertText || (s && s.erreur) || offline || locked ? "alert" : "";
   const open = s && (s.etat === "enregistrement" || s.etat === "pause") && !mine;
   $("close").hidden = !open;
   $("draft").disabled = !sid && !$("text").value.trim() || !!recording || !!(s && s.redaction);

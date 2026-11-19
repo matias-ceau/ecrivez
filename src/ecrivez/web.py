@@ -8,15 +8,19 @@ same transcription and assembly as a session recorded on the computer (`live.py`
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
@@ -479,10 +483,68 @@ class Studio:
             worker.join(timeout=5)
 
 
+# -- access --------------------------------------------------------------------------
+
+CODE_FILE = "web-code"
+CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alikes: typed once on a phone
+COOKIE = "ecrivez"
+COOKIE_SECONDS = 365 * 24 * 3600
+MAX_WAIT = 300.0
+
+
+def access_code(desk: Desk) -> str:
+    """The code that opens the page, made on first use and kept in the private data folder."""
+    path = desk.root / CODE_FILE
+    if not path.exists():
+        letters = [secrets.choice(CODE_ALPHABET) for _ in range(20)]
+        groups = ["".join(letters[i : i + 4]) for i in range(0, 20, 4)]
+        path.touch(mode=0o600)
+        path.write_text("-".join(groups) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _plain(code: str) -> str:
+    return re.sub(r"[\s-]", "", code).lower()
+
+
+class Gate:
+    """One code for one doctor. Each wrong code makes everyone wait longer before the next."""
+
+    def __init__(self, code: str, clock: Callable[[], float] = time.monotonic) -> None:
+        self._code = _plain(code)
+        self.cookie = hmac.new(self._code.encode(), b"ecrivez-web", hashlib.sha256).hexdigest()
+        self._clock = clock
+        self._failures = 0
+        self._locked_until = 0.0
+        self._mutex = threading.Lock()
+
+    def login(self, code: str) -> str:
+        with self._mutex:
+            if self._clock() < self._locked_until:
+                raise Refused(429, "Trop d'essais : attendez un peu avant de réessayer.")
+            if hmac.compare_digest(_plain(code).encode(), self._code.encode()):
+                self._failures = 0
+                return self.cookie
+            self._failures += 1
+            self._locked_until = self._clock() + min(2.0**self._failures, MAX_WAIT)
+            raise Refused(403, "Code d'accès incorrect.")
+
+    def allows(self, header: str | None) -> bool:
+        try:
+            morsel = SimpleCookie(header or "").get(COOKIE)
+        except CookieError:
+            return False
+        return morsel is not None and hmac.compare_digest(
+            morsel.value.encode(), self.cookie.encode()
+        )
+
+
 # -- HTTP ------------------------------------------------------------------------------
 
-STATIC = {
-    "/": ("index.html", "text/html; charset=utf-8"),
+PAGE = ("index.html", "text/html; charset=utf-8")
+LOGIN = ("login.html", "text/html; charset=utf-8")
+PUBLIC = {
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon-192.png": ("icon-192.png", "image/png"),
     "/icon-512.png": ("icon-512.png", "image/png"),
@@ -499,23 +561,48 @@ ROUTES = [
 ]
 
 
-def make_handler(studio: Studio) -> type[BaseHTTPRequestHandler]:
+def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:
             pass
 
-        def _send(self, status: int, body: bytes, content_type: str) -> None:
+        def _send(
+            self, status: int, body: bytes, content_type: str, cookie: str | None = None
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if cookie:
+                flags = f"Max-Age={COOKIE_SECONDS}; Path=/; HttpOnly; Secure; SameSite=Strict"
+                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; {flags}")
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, status: int, payload: dict[str, Any]) -> None:
-            self._send(status, json.dumps(payload).encode(), "application/json")
+        def _json(self, status: int, payload: dict[str, Any], cookie: str | None = None) -> None:
+            self._send(status, json.dumps(payload).encode(), "application/json", cookie)
+
+        def _file(self, entry: tuple[str, str]) -> None:
+            name, content_type = entry
+            body = (resources.files("ecrivez") / "resources" / "web" / name).read_bytes()
+            self._send(200, body, content_type)
+
+        def _login(self, body: _Body) -> None:
+            try:
+                if body.remaining > 4096:
+                    raise Refused(413, "Envoi trop volumineux.")
+                asked = json.loads(body.read(4096) or b"{}")
+                cookie = gate.login(str(asked.get("code") or ""))
+            except (ValueError, AttributeError):
+                self._json(400, {"erreur": "Demande illisible."})
+            except Refused as e:
+                self._json(e.status, {"erreur": e.message})
+            else:
+                self._json(200, {"ok": True}, cookie)
 
         def _length(self, limit: int) -> int:
             raw = self.headers.get("Content-Length") or "0"
@@ -528,15 +615,24 @@ def make_handler(studio: Studio) -> type[BaseHTTPRequestHandler]:
         def _dispatch(self, method: str) -> None:
             url = urlsplit(self.path)
             query = parse_qs(url.query)
-            if method == "GET" and url.path in STATIC:
-                name, content_type = STATIC[url.path]
-                body = (resources.files("ecrivez") / "resources" / "web" / name).read_bytes()
-                self._send(200, body, content_type)
+            allowed = gate.allows(self.headers.get("Cookie"))
+            if method == "GET" and url.path in PUBLIC:
+                self._file(PUBLIC[url.path])
+                return
+            if method == "GET" and url.path == "/":
+                self._file(PAGE if allowed else LOGIN)
                 return
             try:
                 body = _Body(self.rfile, self._length(MAX_UPLOAD))
             except Refused as e:
                 self._json(e.status, {"erreur": e.message})
+                return
+            if method == "POST" and url.path == "/api/acces":
+                self._login(body)
+                return
+            if not allowed:
+                self.close_connection = True  # do not read a body nobody is entitled to send
+                self._json(401, {"erreur": "Code d'accès requis."})
                 return
             status, answer = 404, {"erreur": "Adresse inconnue."}
             for verb, pattern, action in ROUTES:
@@ -597,9 +693,9 @@ def make_handler(studio: Studio) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def make_server(studio: Studio, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    """Loopback only: the page is reached through `tailscale serve`, never directly."""
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(studio))
+def make_server(studio: Studio, gate: Gate, port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
+    """Loopback only: the page is reached through an HTTPS relay, never directly."""
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(studio, gate))
     server.daemon_threads = True
     return server
 
@@ -622,8 +718,9 @@ def main(argv: list[str] | None = None) -> int:
             studio.sweep()
 
     threading.Thread(target=sweeper, daemon=True).start()
-    server = make_server(studio, args.port)
+    server = make_server(studio, Gate(access_code(desk)), args.port)
     print(f"ecrivez-web : http://127.0.0.1:{args.port} (données : {desk.root})", flush=True)
+    print(f"Code d'accès : dans le fichier {desk.root / CODE_FILE}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

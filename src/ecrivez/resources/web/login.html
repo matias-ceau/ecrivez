@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#100F0F">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<title>Ecrivez</title>
+<style>
+  body { margin:0; background:#100F0F; color:#CECDC3; font:17px/1.45 system-ui, "Noto Sans", sans-serif;
+         padding:22vh 20px 0; max-width:420px; margin-inline:auto; }
+  label { display:block; margin-bottom:8px; }
+  input, button { width:100%; font:inherit; color:#CECDC3; background:#282726;
+                  border:1px solid #403E3C; border-radius:10px; padding:14px; }
+  button { margin-top:12px; font-weight:700; }
+  #error { color:#D14D41; min-height:1.5em; margin-top:12px; }
+</style>
+</head>
+<body>
+<form id="form">
+  <input type="text" name="username" value="ecrivez" autocomplete="username" hidden>
+  <label for="code">Code d'accès</label>
+  <input id="code" type="password" autocomplete="current-password" autocapitalize="none"
+         autocorrect="off" spellcheck="false" required>
+  <button>Entrer</button>
+  <div id="error"></div>
+</form>
+<script>
+"use strict";
+document.getElementById("form").onsubmit = async event => {
+  event.preventDefault();
+  const error = document.getElementById("error");
+  error.textContent = "";
+  try {
+    const answer = await fetch("/api/acces", {
+      method: "POST", body: JSON.stringify({code: document.getElementById("code").value})});
+    if (answer.ok) return location.reload();
+    error.textContent = (await answer.json()).erreur;
+  } catch (e) { error.textContent = "Serveur injoignable."; }
+};
+</script>
+</body>
+</html>

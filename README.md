@@ -32,11 +32,14 @@ Le Python fourni par `uv` a un Tk sans polices modernes : installer avec celui d
 Une page web privée, installable sur l'écran d'accueil du téléphone : enregistrer (l'audio
 part à la maison toutes les cinq secondes et reste dans le téléphone tant qu'il n'est pas
 confirmé), ou envoyer un fichier du dictaphone ; puis transcription, note, copie, mail.
-Le serveur n'écoute que sur `127.0.0.1` ; on l'expose au seul réseau Tailscale :
+Le serveur n'écoute que sur `127.0.0.1` et exige un code d'accès (créé au premier
+lancement dans `$ECRIVEZ_DATA/web-code`, saisi une fois par appareil). On l'expose par un
+relais HTTPS qui ne déchiffre pas en route :
 
 ```
 ecrivez-web --port 8377
-tailscale serve --bg --https=8443 http://127.0.0.1:8377
+tailscale serve  --bg --https=8443 http://127.0.0.1:8377   # réseau Tailscale seulement
+tailscale funnel --bg --https=8443 http://127.0.0.1:8377   # ou : adresse publique
 ```
 
 Détails et cas limites : [spec](docs/superpowers/specs/2026-11-19-mobile.md).

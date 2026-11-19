@@ -376,17 +376,26 @@ def test_two_devices_see_the_same_session(kit):
 # -- over HTTP -------------------------------------------------------------------------
 
 
+CODE = "abcd-efgh-jkmn-pqrs-tuvw"
+COOKIE = f"ecrivez={web.Gate(CODE).cookie}"
+
+
 @pytest.fixture
 def server(kit):
-    httpd = web.make_server(kit.studio, port=0)
+    kit.gate_clock = Clock()
+    httpd = web.make_server(kit.studio, web.Gate(CODE, kit.gate_clock), port=0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
 
 
-def call(method: str, url: str, body: bytes | None = None) -> tuple[int, dict]:
+def call(
+    method: str, url: str, body: bytes | None = None, cookie: str | None = COOKIE
+) -> tuple[int, dict]:
     request = urllib.request.Request(url, data=body, method=method)
+    if cookie:
+        request.add_header("Cookie", cookie)
     try:
         with urllib.request.urlopen(request, timeout=5) as r:
             return r.status, json.load(r)
@@ -427,10 +436,13 @@ def test_a_refused_upload_leaves_the_connection_usable(kit, server):
     sid = kit.studio.create()
     host = server.removeprefix("http://")
     connection = http.client.HTTPConnection(host, timeout=5)
-    connection.request("POST", f"/api/seances/{sid}/fichier?nom=virus.exe", body=b"x" * 100_000)
+    headers = {"Cookie": COOKIE}
+    connection.request(
+        "POST", f"/api/seances/{sid}/fichier?nom=virus.exe", body=b"x" * 100_000, headers=headers
+    )
     refused = connection.getresponse()
     assert refused.status == 400 and "audio" in json.load(refused)["erreur"]
-    connection.request("GET", f"/api/seances/{sid}")
+    connection.request("GET", f"/api/seances/{sid}", headers=headers)
     again = connection.getresponse()
     assert again.status == 200 and json.load(again)["id"] == sid
     connection.close()
@@ -444,7 +456,8 @@ def test_an_oversized_chunk_is_refused(kit, server):
 
 
 def test_the_page_and_its_install_manifest_are_served(server):
-    with urllib.request.urlopen(f"{server}/", timeout=5) as r:
+    page = urllib.request.Request(f"{server}/", headers={"Cookie": COOKIE})
+    with urllib.request.urlopen(page, timeout=5) as r:
         assert "text/html" in r.headers["Content-Type"]
         assert "Enregistrer" in r.read().decode()
     with urllib.request.urlopen(f"{server}/manifest.webmanifest", timeout=5) as r:
@@ -460,6 +473,66 @@ def test_unknown_routes_and_sessions_answer_404(server):
 
 
 def test_the_server_only_listens_on_this_machine(kit):
-    httpd = web.make_server(kit.studio, port=0)
+    httpd = web.make_server(kit.studio, web.Gate(CODE), port=0)
     assert httpd.server_address[0] == "127.0.0.1"
     httpd.server_close()
+
+
+# -- the access code -------------------------------------------------------------------
+
+
+def test_without_the_access_code_no_patient_data_is_served_or_accepted(kit, server):
+    sid = finished(kit)
+    assert call("GET", f"{server}/api/seances", cookie=None)[0] == 401
+    assert call("GET", f"{server}/api/seances/{sid}", cookie=None)[0] == 401
+    assert call("PUT", f"{server}/api/seances/{sid}/tranches/5/0", b"zz", cookie=None)[0] == 401
+    assert call("POST", f"{server}/api/seances", cookie="ecrivez=deadbeef")[0] == 401
+    with urllib.request.urlopen(f"{server}/", timeout=5) as r:
+        page = r.read().decode()
+    assert "Code d'accès" in page and "Transcription" not in page
+
+
+def test_the_install_manifest_and_icon_need_no_code(server):
+    for path in ("/manifest.webmanifest", "/icon-192.png"):
+        with urllib.request.urlopen(f"{server}{path}", timeout=5) as r:
+            assert r.status == 200
+
+
+def login(server: str, code: str) -> tuple[int, str]:
+    request = urllib.request.Request(
+        f"{server}/api/acces", data=json.dumps({"code": code}).encode(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as r:
+            return r.status, r.headers.get("Set-Cookie") or ""
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+
+
+def test_the_right_code_typed_loosely_opens_the_door_for_a_long_time(server):
+    status, cookie = login(server, " ABCD efgh-jkmn pqrs TUVW ")
+    assert status == 200
+    for flag in ("HttpOnly", "Secure", "SameSite=Strict", "Max-Age=31536000"):
+        assert flag in cookie
+    assert CODE not in cookie
+    assert call("GET", f"{server}/api/seances", cookie=cookie.split(";")[0])[0] == 200
+
+
+def test_wrong_codes_slow_down_every_further_attempt(kit, server):
+    assert login(server, "mauvais-code")[0] == 403
+    assert login(server, CODE)[0] == 429  # even the right one must wait
+    kit.gate_clock.now += 3
+    assert login(server, "encore-faux")[0] == 403
+    kit.gate_clock.now += 3
+    assert login(server, CODE)[0] == 429  # the wait grows with each failure
+    kit.gate_clock.now += 600
+    assert login(server, CODE)[0] == 200
+
+
+def test_the_access_code_is_created_once_private_and_hard_to_guess(tmp_path):
+    desk = open_desk({"ECRIVEZ_DATA": str(tmp_path)})
+    code = web.access_code(desk)
+    assert web.access_code(desk) == code
+    assert len(code.replace("-", "")) >= 20
+    assert (tmp_path / "web-code").stat().st_mode & 0o077 == 0
+    assert web.access_code(open_desk({"ECRIVEZ_DATA": str(tmp_path / "autre")})) != code
