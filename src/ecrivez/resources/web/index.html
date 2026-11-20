@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#100F0F">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<title>Ecrivez</title>
+<style>
+  :root { --bg:#100F0F; --field:#282726; --line:#403E3C; --fg:#CECDC3; --dim:#878580;
+          --red:#D14D41; --blue:#4385BE; --green:#879A39; }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.45 system-ui, "Noto Sans", sans-serif;
+         padding:16px 16px calc(24px + env(safe-area-inset-bottom)); max-width:720px; margin-inline:auto; }
+  h2 { font-size:13px; font-weight:600; color:var(--dim); text-transform:uppercase;
+       letter-spacing:.06em; margin:22px 0 6px; }
+  button, select, textarea, input[type=email], .file { font:inherit; color:var(--fg); background:var(--field);
+       border:1px solid var(--line); border-radius:10px; }
+  button, .file { padding:12px 14px; cursor:pointer; }
+  button:disabled { opacity:.45; }
+  #rec { width:100%; padding:22px; font-size:22px; font-weight:700; color:var(--red);
+         border-radius:16px; }
+  #rec.on { background:var(--red); color:#fff; border-color:var(--red); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+  #clock { font-size:30px; font-variant-numeric:tabular-nums; flex:1; }
+  select, input[type=email] { padding:10px; }
+  #to-other { flex:1; min-width:180px; }
+  #to-hint { font-size:14px; margin-top:6px; }
+  #status { margin-top:12px; min-height:1.5em; }
+  #queue { color:var(--dim); font-size:14px; }
+  .alert { color:var(--red); font-weight:600; }
+  textarea { width:100%; min-height:84px; padding:10px; resize:vertical; }
+  .box { background:var(--field); border-radius:10px; padding:12px; white-space:pre-wrap;
+         overflow-wrap:anywhere; min-height:64px; max-height:46vh; overflow:auto; }
+  .box:empty::before { content:attr(data-empty); color:var(--dim); }
+  .file { display:inline-block; }
+  .file input { display:none; }
+  #sessions button { width:100%; text-align:left; margin-bottom:8px; display:flex;
+                     justify-content:space-between; }
+  #sessions .current { border-color:var(--blue); }
+  .tag { color:var(--dim); font-size:14px; }
+</style>
+</head>
+<body>
+<button id="rec">●&nbsp; Enregistrer</button>
+<div class="row">
+  <div id="clock">00:00</div>
+  <label>Trame <select id="template"></select></label>
+</div>
+<div class="row" id="to-row">
+  <label>Mail <select id="to"></select></label>
+  <input id="to-other" type="email" placeholder="adresse@exemple.fr" autocomplete="email" hidden>
+</div>
+<div id="to-hint"></div>
+<div id="status">Chargement…</div>
+<div id="queue"></div>
+
+<div class="row">
+  <label class="file">Envoyer un fichier audio<input id="file" type="file" accept="audio/*,video/mp4,.m4a,.amr,.3gp,.opus"></label>
+  <button id="close" hidden>Clore la séance</button>
+</div>
+
+<h2>Texte à joindre</h2>
+<textarea id="text" placeholder="Collé depuis le logiciel de l'hôpital (facultatif)"></textarea>
+
+<h2>Transcription</h2>
+<div id="transcript" class="box" data-empty="Elle se remplit par tranches pendant la séance."></div>
+
+<div class="row"><button id="draft">Rédiger la note</button></div>
+
+<h2>Note</h2>
+<div id="note" class="box" data-empty="Pas encore de note."></div>
+<div class="row">
+  <button id="copy">Copier</button>
+  <button id="mail">Envoyer par mail</button>
+</div>
+
+<h2>Séances du jour</h2>
+<div id="sessions"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const CHUNK_MS = 5000;
+let partSeconds = 120;
+let sid = localStorage.getItem("sid");   // the session shown on screen
+let recording = null;                     // {sid, stream, recorder, tranche, started, rotate}
+let wakeLock = null;
+let alertText = "";
+
+// -- queue of what the server has not confirmed yet (survives reloads and network loss) --
+
+const opened = new Promise((resolve, reject) => {
+  const request = indexedDB.open("ecrivez", 1);
+  request.onupgradeneeded = () => request.result.createObjectStore("file", {autoIncrement: true});
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+async function store(mode, action) {
+  const db = await opened;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("file", mode);
+    const request = action(tx.objectStore("file"));
+    tx.oncomplete = () => resolve(request && request.result);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+const enqueue = item => store("readwrite", s => s.add(item));
+const dequeue = key => store("readwrite", s => s.delete(key));
+const waiting = () => store("readonly", s => s.count());
+async function oldest() {
+  const db = await opened;
+  return new Promise((resolve, reject) => {
+    const request = db.transaction("file").objectStore("file").openCursor();
+    request.onsuccess = () => {
+      const c = request.result;
+      resolve(c ? {key: c.key, value: c.value} : null);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+let pumping = false;
+async function pump() {
+  if (pumping) return;
+  pumping = true;
+  try {
+    for (let item = await oldest(); item; item = await oldest()) {
+      const v = item.value;
+      let answer;
+      try {
+        answer = v.type === "fin"
+          ? await fetch(`/api/seances/${v.sid}/fin`, {method: "POST", body: v.body})
+          : v.type === "creation"
+          ? await fetch(`/api/seances/${v.sid}`, {method: "PUT", body: v.body})
+          : await fetch(`/api/seances/${v.sid}/tranches/${v.tranche}/${v.rang}?ext=${v.ext}`,
+                        {method: "PUT", body: v.blob});
+      } catch (e) { break; }                       // no network: try again later
+      if (answer.status >= 500) break;             // server trouble: try again later
+      if (answer.status === 401 || answer.status === 429) { locked = true; break; }  // keep it
+      await dequeue(item.key);                     // accepted, or can never be accepted
+    }
+  } finally {
+    pumping = false;
+    showQueue();
+  }
+}
+let queued = 0;
+async function showQueue() {
+  const n = queued = await waiting();
+  $("queue").textContent = n ? `${n} morceau${n > 1 ? "x" : ""} en attente d'envoi` : "";
+}
+setInterval(pump, 3000);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+addEventListener("online", pump);
+
+// -- recording ----------------------------------------------------------------------
+
+function format() {
+  for (const [mime, ext] of [["audio/webm;codecs=opus", "webm"], ["audio/ogg;codecs=opus", "ogg"],
+                             ["audio/mp4", "m4a"]])
+    if (MediaRecorder.isTypeSupported(mime)) return {mime, ext};
+  return null;
+}
+
+function localId() {
+  const d = new Date(), p = (n, width = 2) => String(n).padStart(width, "0");
+  const day = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const hour = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${day}_${hour}-9${p(Math.floor(Math.random() * 1000), 3)}`;  // never a server-made name
+}
+// Where the note is mailed: "" is the usual address, "aucun" keeps it on the page.
+const ADDRESS = /^[^\s@,;<>"'-][^\s@,;<>"']*@[^\s@,;<>"'.]+(\.[^\s@,;<>"'.]+)+$/;
+function recipient() {
+  const choice = $("to").value;
+  if (choice !== "autre") return choice;
+  const typed = $("to-other").value.trim();
+  return ADDRESS.test(typed) ? typed : "";   // never a half-typed address
+}
+const wish = () => JSON.stringify(
+  {trame: $("template").value || null, texte: $("text").value, mail: recipient()});
+
+function startPart(r) {
+  const {mime, ext} = format();
+  const tranche = r.tranche;
+  let rang = 0;
+  const recorder = new MediaRecorder(r.stream, {mimeType: mime, audioBitsPerSecond: 32000});
+  recorder.ondataavailable = e => {
+    if (e.data.size) enqueue({type: "chunk", sid: r.sid, tranche, rang: rang++, ext, blob: e.data}).then(pump);
+  };
+  recorder.start(CHUNK_MS);
+  r.recorder = recorder;
+}
+
+async function start() {
+  if (!window.MediaRecorder || !format() || !navigator.mediaDevices) {
+    return fail("Ce navigateur ne sait pas enregistrer : utilisez « Envoyer un fichier audio ».");
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: false}});
+  } catch (e) {
+    return fail("Micro refusé par le navigateur. Autorisez-le, ou utilisez « Envoyer un fichier audio ».");
+  }
+  const id = localId();                     // no server needed: it learns the name later
+  await enqueue({type: "creation", sid: id, body: wish()});
+  alertText = "";
+  show(id);
+  const r = recording = {sid: id, stream, tranche: 0, started: Date.now()};
+  startPart(r);
+  r.rotate = setInterval(() => {            // new part first, then close the old one: no gap
+    const old = r.recorder;
+    r.tranche++;
+    startPart(r);
+    old.stop();
+  }, partSeconds * 1000);
+  stream.getAudioTracks()[0].addEventListener("ended", () => {
+    if (recording === r) stop("L'enregistrement s'est arrêté tout seul (micro repris par le téléphone).");
+  });
+  keepAwake();
+  render();
+}
+
+async function stop(reason) {
+  const r = recording;
+  if (!r) return;
+  recording = null;
+  clearInterval(r.rotate);
+  await new Promise(done => {
+    r.recorder.addEventListener("stop", done);
+    r.recorder.state === "inactive" ? done() : r.recorder.stop();
+  });
+  r.stream.getTracks().forEach(t => t.stop());
+  await enqueue({type: "fin", sid: r.sid, body: wish()});
+  if (wakeLock) wakeLock.release().catch(() => {});
+  alertText = reason || "";
+  pump();
+  render();
+}
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) { wakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { if (recording) keepAwake(); pump(); refresh(); }
+});
+addEventListener("beforeunload", e => { if (recording) e.preventDefault(); });
+
+// -- talking to the server ----------------------------------------------------------
+
+let locked = false;                       // the access code is asked again: nothing is dropped
+async function api(method, path, body) {
+  const answer = await fetch(path, {method, body});
+  if (answer.status === 401) {
+    locked = true;
+    if (!recording) location.reload();    // shows the access code page
+  }
+  const data = await answer.json();
+  if (!answer.ok) throw new Error(data.erreur || `Erreur ${answer.status}`);
+  return data;
+}
+function fail(message) { alertText = message; render(); }
+
+function show(id) {
+  sid = id;
+  id ? localStorage.setItem("sid", id) : localStorage.removeItem("sid");
+  state = null;
+  refresh();
+}
+
+let state = null;
+const LABELS = {nouvelle: "Prêt.", enregistrement: "Enregistrement", pause: "En pause",
+                transcription: "Transcription", terminee: "Terminée"};
+async function refresh() {
+  try {
+    const today = await api("GET", "/api/seances");
+    partSeconds = today.duree_tranche;
+    localStorage.setItem("trames", JSON.stringify(
+      {trames: today.trames, trame: today.trame, adresses: today.adresses}));
+    canMail = today.mail !== false;
+    if (!canMail) $("mail").textContent = "Partager";
+    $("to-row").hidden = $("to-hint").hidden = !canMail;
+    fillTemplates(today);
+    fillAddresses(today.adresses);
+    fillSessions(today.seances);
+    if (sid) {
+      try { state = await api("GET", `/api/seances/${sid}`); }
+      catch (e) { if (!recording && !queued) show(null); }   // not known there yet: still in the queue
+    }
+    offline = false;
+  } catch (e) { offline = true; }
+  render();
+}
+let offline = false;
+setInterval(refresh, 3000);
+
+function fillTemplates(today) {
+  const select = $("template");
+  if (select.options.length) return;
+  for (const name of [...today.trames, ""]) select.add(new Option(name || "libre", name));
+  select.value = localStorage.getItem("trame") ?? (today.trame || "");
+}
+$("template").onchange = () => localStorage.setItem("trame", $("template").value);
+
+let offered = null;                       // the addresses the menu was built with
+function fillAddresses(addresses) {
+  const listed = JSON.stringify(addresses || []);
+  if (listed === offered) return;
+  offered = listed;
+  const select = $("to");
+  select.replaceChildren(new Option("adresse habituelle", ""),
+                         ...(addresses || []).map(a => new Option(a, a)),
+                         new Option("autre…", "autre"), new Option("pas de mail", "aucun"));
+  const saved = localStorage.getItem("mail") || "";
+  select.value = [...select.options].some(o => o.value === saved) ? saved : "";
+  $("to-other").value = localStorage.getItem("mail_autre") || "";
+  showRecipient();
+}
+function showRecipient() {
+  const choice = $("to").value, typed = $("to-other").value.trim();
+  $("to-other").hidden = choice !== "autre";
+  const unfinished = choice === "autre" && !ADDRESS.test(typed);
+  $("to-hint").className = unfinished ? "alert" : "tag";
+  $("to-hint").textContent = unfinished ? "Adresse incomplète : la note irait à l'adresse habituelle."
+    : choice === "aucun" ? "La note sera rédigée et restera sur cette page." : "";
+}
+$("to").onchange = () => { localStorage.setItem("mail", $("to").value); showRecipient(); };
+$("to-other").oninput = () => { localStorage.setItem("mail_autre", $("to-other").value.trim()); showRecipient(); };
+try {
+  const kept = JSON.parse(localStorage.getItem("trames"));
+  fillTemplates(kept);
+  fillAddresses(kept.adresses);
+} catch (e) { /* first visit */ }
+
+function fillSessions(sessions) {
+  const box = $("sessions");
+  box.replaceChildren(...sessions.slice().reverse().map(s => {
+    const b = document.createElement("button");
+    b.className = s.id === sid ? "current" : "";
+    const label = document.createElement("span");
+    label.textContent = s.heure;
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = (LABELS[s.etat] || s.etat).replace(".", "") + (s.note ? " · note" : "");
+    b.append(label, tag);
+    b.onclick = () => { if (!recording) show(s.id); };
+    return b;
+  }));
+  if (!sessions.length) box.textContent = "Aucune séance aujourd'hui.";
+}
+
+function render() {
+  const mine = recording && recording.sid === sid;
+  $("rec").className = recording ? "on" : "";
+  $("rec").innerHTML = recording ? "■&nbsp; Arrêter" : "●&nbsp; Enregistrer";
+  const s = state;
+  let text = "Prêt.";
+  if (s) {
+    const progress = s.tranches ? ` · ${s.transcrites}/${s.tranches} tranches transcrites` : "";
+    if (s.etat === "enregistrement") text = (mine ? "Enregistrement en cours" : "Séance ouverte, enregistrée ailleurs ou interrompue") + progress;
+    else if (s.etat === "pause") text = "En pause : plus rien reçu du téléphone. Ce qui est arrivé est transcrit.";
+    else if (s.etat === "transcription") text = "Transcription" + progress;
+    else if (s.etat === "terminee") {
+      if (s.envoye) text = `Note envoyée par mail à ${s.envoye} (${s.envoye_a || "adresse habituelle"}).`;
+      else if (s.note) text = s.auto ? "Note prête, envoi par mail en cours…" : "Note prête.";
+      else text = s.auto ? "Transcription terminée, la note arrive toute seule…" : "Transcription terminée.";
+    }
+    if (s.redaction) text = "Rédaction de la note…";
+    if (s.erreur) text = s.erreur;
+    $("transcript").textContent = s.transcription;
+    $("note").textContent = s.note || "";
+  } else {
+    $("transcript").textContent = "";
+    $("note").textContent = "";
+  }
+  if (locked) text = "Code d'accès redemandé. " + (recording ? "L'enregistrement continue ; arrêtez puis rouvrez la page, l'audio partira ensuite." : "");
+  if (offline) text = "Maison injoignable. " + (recording ? "L'enregistrement continue et reste dans le téléphone."
+    : queued ? "L'enregistrement est gardé dans le téléphone : rouvrez cette page quand la maison est joignable, il partira tout seul." : "");
+  const status = $("status");
+  status.textContent = alertText || text;
+  status.className = alertText || (s && s.erreur) || offline || locked ? "alert" : "";
+  const open = s && (s.etat === "enregistrement" || s.etat === "pause") && !mine;
+  $("close").hidden = !open;
+  $("draft").disabled = !sid && !$("text").value.trim() || !!recording || !!(s && s.redaction);
+  $("copy").disabled = $("mail").disabled = !(s && s.note);
+}
+
+setInterval(() => {
+  if (!recording) return;
+  const t = Math.floor((Date.now() - recording.started) / 1000);
+  $("clock").textContent = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+}, 500);
+
+// -- buttons ------------------------------------------------------------------------
+
+$("rec").onclick = () => recording ? stop() : start();
+
+$("close").onclick = async () => {
+  try { await api("POST", `/api/seances/${sid}/fin`); alertText = ""; } catch (e) { fail(e.message); }
+  refresh();
+};
+
+$("file").onchange = async () => {
+  const file = $("file").files[0];
+  $("file").value = "";
+  if (!file || recording) return;
+  try {
+    const created = await api("POST", "/api/seances", wish());
+    show(created.id);
+    await new Promise((done, failed) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/seances/${created.id}/fichier?nom=${encodeURIComponent(file.name)}`);
+      xhr.upload.onprogress = e => {
+        alertText = "";
+        $("status").textContent = `Envoi du fichier… ${Math.round(100 * e.loaded / e.total)} %`;
+      };
+      xhr.onload = () => xhr.status < 300 ? done() : failed(new Error(JSON.parse(xhr.responseText).erreur));
+      xhr.onerror = () => failed(new Error("Envoi interrompu : réessayez quand le réseau est revenu."));
+      xhr.send(file);
+    });
+    alertText = "";
+  } catch (e) { fail(e.message); }
+  refresh();
+};
+
+$("draft").onclick = async () => {
+  try {
+    if (!sid) show((await api("POST", "/api/seances")).id);
+    await api("POST", `/api/seances/${sid}/note`,
+              JSON.stringify({trame: $("template").value || null, texte: $("text").value}));
+    alertText = "";
+  } catch (e) { fail(e.message); }
+  refresh();
+};
+
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("note").textContent); flash($("copy"), "Copié"); }
+  catch (e) { fail("Copie impossible : sélectionnez le texte à la main."); }
+};
+
+let canMail = true;
+
+// No mail command on this machine (a phone): hand the note to the phone's own apps.
+async function shareNote() {
+  const text = $("note").textContent;
+  const title = "Note ecrivez " + new Date().toLocaleDateString("fr-FR");
+  if (navigator.share) {
+    try { await navigator.share({ title, text }); } catch (e) { /* closed without choosing */ }
+    return;
+  }
+  location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
+}
+
+$("mail").onclick = async () => {
+  if (!canMail) return shareNote();
+  $("mail").disabled = true;
+  const to = recipient() === "aucun" ? "" : recipient();   // the button always sends somewhere
+  try {
+    await api("POST", `/api/seances/${sid}/mail`, JSON.stringify({mail: to}));
+    flash($("mail"), "Envoyé");
+    alertText = "";
+  }
+  catch (e) { fail(e.message); }
+  render();
+};
+
+function flash(button, text) {
+  const before = button.textContent;
+  button.textContent = text;
+  setTimeout(() => { button.textContent = before; }, 1500);
+}
+
+$("text").oninput = render;
+refresh();
+pump();
+</script>
+</body>
+</html>

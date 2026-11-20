@@ -1,7 +1,7 @@
 import pytest
 
 from ecrivez.desk import open_desk
-from ecrivez.writer import Revision, draft, parse_revision, revise
+from ecrivez.writer import Revision, ToolError, draft, parse_revision, revise
 
 
 class FakeRun:
@@ -97,3 +97,61 @@ def test_draft_prompt_explains_speaker_letters(desk):
     assert "lettres en début de ligne" in run.system
     assert "qui est le médecin" in run.system
     assert "autre patient" in run.system
+
+
+ONLINE = {"ECRIVEZ_DRAFT_MODEL": "anthropic/some-model", "OPENROUTER_API_KEY": "sk-test"}
+
+
+class FakePost:
+    def __init__(self, answer: dict) -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def __call__(self, url: str, key: str, payload: dict) -> dict:
+        self.calls.append((url, key, payload))
+        return self.answer
+
+
+def reply(text: str) -> dict:
+    return {"choices": [{"message": {"content": text}}]}
+
+
+def test_draft_goes_online_when_a_draft_model_is_named(desk):
+    run, post = FakeRun("jamais"), FakePost(reply("  note en ligne \n"))
+    assert draft(desk, "dictée", "tca", run, ONLINE, post) == "note en ligne"
+    assert run.calls == []
+    url, key, payload = post.calls[0]
+    assert url == "https://openrouter.ai/api/v1/chat/completions"
+    assert key == "sk-test"
+    assert payload["model"] == "anthropic/some-model"
+    system, user = payload["messages"]
+    assert system["role"] == "system"
+    assert "=== TRAME ===" in system["content"] and "craving" in system["content"]
+    assert user == {"role": "user", "content": "dictée"}
+
+
+def test_online_draft_reports_the_service_error(desk):
+    post = FakePost({"error": {"message": "crédit épuisé"}})
+    with pytest.raises(ToolError, match="rédaction en ligne : crédit épuisé"):
+        draft(desk, "dictée", "tca", FakeRun(""), ONLINE, post)
+
+
+def test_online_draft_refuses_an_empty_answer(desk):
+    with pytest.raises(ToolError, match="réponse vide"):
+        draft(desk, "dictée", None, FakeRun(""), ONLINE, FakePost(reply("  ")))
+
+
+def test_online_draft_without_a_key_says_which_variable_is_missing(desk):
+    env = {"ECRIVEZ_DRAFT_MODEL": "anthropic/some-model"}
+    with pytest.raises(ToolError, match="OPENROUTER_API_KEY"):
+        draft(desk, "dictée", None, FakeRun(""), env, FakePost(reply("x")))
+
+
+def test_revise_goes_online_too(desk):
+    desk.save("source", "note", None)
+    last = desk.last()
+    assert last is not None
+    post = FakePost(reply("note corrigée\n===MEMOIRE===\nlexique: craving"))
+    revision = revise(desk, last, "remarque", FakeRun(""), ONLINE, post)
+    assert revision == Revision("note corrigée", ["craving"], [])
+    assert "=== REMARQUE DU MÉDECIN ===" in post.calls[0][2]["messages"][1]["content"]

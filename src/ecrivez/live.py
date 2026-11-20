@@ -22,6 +22,7 @@ from ecrivez.writer import Run, ToolError, run_tool
 
 PART_SECONDS = 120
 PARTS = "parts"
+PART_SUFFIXES = (".flac", ".webm", ".ogg", ".m4a")
 TRANSCRIPT = "transcription.txt"
 INAUDIBLE_PART = "[tranche inaudible]"
 BROKEN_PART = "[tranche illisible : enregistrement interrompu]"
@@ -51,7 +52,8 @@ class Session:
         self.parts_dir = folder / PARTS
 
     def parts(self) -> list[Path]:
-        return sorted(self.parts_dir.glob("part*.flac"))
+        found = self.parts_dir.glob("part*") if self.parts_dir.exists() else []
+        return sorted(p for p in found if p.suffix in PART_SUFFIXES)
 
     def pending(self, recording: bool) -> list[Path]:
         parts = self.parts()
@@ -112,20 +114,41 @@ class Session:
             return True
         return True
 
+    def audio(self) -> Path | None:
+        return next(iter(sorted(self.folder.glob("audio.*"))), None)
+
     def assemble(self, run: Run = run_tool) -> Path:
-        """Join the parts into audio.flac, then drop them (only once all are transcribed)."""
+        """Join the parts into one audio file, then drop them (only once all are transcribed).
+
+        Parts that all share a compressed format (a phone's webm) are joined as they are:
+        decoding them to FLAC would make the file about ten times larger.
+        """
         parts = [
             p
             for p in self.parts()
             if p.stat().st_size > 0
             and p.with_suffix(".txt").read_text(encoding="utf-8").strip() != BROKEN_PART
         ]
+        suffixes = {p.suffix for p in parts}
         dest = self.folder / "audio.flac"
         if parts:
             listing = self.parts_dir / "liste.txt"
             listing.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
             argv = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0"]
-            run([*argv, "-i", str(listing), "-c:a", "flac", str(dest)], None)
+            argv += ["-i", str(listing)]
+            same = suffixes.pop() if len(suffixes) == 1 else ".flac"
+            if same != ".flac":
+                kept = self.folder / f"audio{same}"
+                try:
+                    run([*argv, "-c", "copy", str(kept)], None)
+                except ToolError:
+                    kept.unlink(missing_ok=True)  # a half-written join is not an audio file
+                if kept.exists() and kept.stat().st_size > 0:
+                    dest = kept
+                else:
+                    kept.unlink(missing_ok=True)
+            if dest.suffix == ".flac":
+                run([*argv, "-c:a", "flac", str(dest)], None)
             if not dest.exists() or dest.stat().st_size == 0:
                 raise ToolError("ffmpeg", "assemblage de l'audio impossible")
         _write_atomic(self.folder / TRANSCRIPT, self.transcript() + "\n")
@@ -178,6 +201,7 @@ class Worker(threading.Thread):
         run: Run = run_tool,
         retry: float = RETRY_SECONDS,
         poll: float = 1.0,
+        hold: threading.Event | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.session = session
@@ -187,17 +211,22 @@ class Worker(threading.Thread):
         self.run_tool = run
         self.retry = retry
         self.poll = poll
+        self.hold = hold  # while set, a stopped session is transcribed but not assembled
         self.done = threading.Event()
+        self.stop = threading.Event()  # leave at once, touching nothing (server shutdown)
         self.audio: Path | None = None
 
     def run(self) -> None:
         while True:
+            if self.stop.is_set():
+                self.done.set()
+                return
             still_recording = self.recording.is_set()
             pending = self.session.pending(recording=still_recording)
             if not pending:
-                if not still_recording:
+                if not still_recording and not (self.hold and self.hold.is_set()):
                     break
-                time.sleep(self.poll)
+                self.stop.wait(self.poll)
                 continue
             part = pending[0]
             try:
@@ -208,8 +237,10 @@ class Worker(threading.Thread):
                 continue
             except (ToolError, OSError) as e:
                 self.notify(f"Transcription en attente ({e}), nouvel essai dans un instant")
-                time.sleep(self.retry)
+                self.stop.wait(self.retry)
                 continue
+            if part not in self.session.pending(recording=self.recording.is_set()):
+                continue  # recording resumed into this part meanwhile: transcribe it again later
             self.session.store(part, text, raw)
             self.notify("tranche transcrite")
         try:
