@@ -105,6 +105,7 @@ class Studio:
         run: Run = run_tool,
         draft: Draft = writer.draft,
         send: Callable[[str], object] = mail.send,
+        can_mail: Callable[[], bool] = mail.available,
         clock: Callable[[], float] = time.time,
         part_seconds: int = live.PART_SECONDS,
         idle_pause: float = 600,
@@ -117,6 +118,7 @@ class Studio:
         self.run = run
         self.draft = draft
         self.send = send
+        self.can_mail = can_mail
         self.clock = clock
         self.part_seconds = part_seconds
         self.idle_pause = idle_pause
@@ -343,8 +345,9 @@ class Studio:
             return "pause"
         if meta["phase"] == "decoupage" or (folder / live.PARTS).exists():
             return "transcription"
-        kept = ("audio.flac", live.TRANSCRIPT, "note.txt")
-        if any((folder / name).exists() for name in kept) or any(folder.glob("original.*")):
+        kept = (live.TRANSCRIPT, "note.txt")
+        sound = any(folder.glob("audio.*")) or any(folder.glob("original.*"))
+        if sound or any((folder / name).exists() for name in kept):
             return "terminee"
         return "nouvelle"
 
@@ -393,6 +396,7 @@ class Studio:
             "trames": self.desk.templates(),
             "trame": _current_template(self.desk),
             "duree_tranche": self.part_seconds,
+            "mail": self.can_mail(),
         }
 
     # -- the note ----------------------------------------------------------------------

@@ -47,6 +47,7 @@ class Kit:
         self.clock = Clock()
         self.drafted: list[tuple[str, str | None]] = []
         self.mailed: list[str] = []
+        self.can_mail = True
         self.draft_error: ToolError | None = None
         self.studio = self.new_studio()
 
@@ -57,6 +58,7 @@ class Kit:
             run=fake_run,
             draft=self.draft,
             send=self.mailed.append,
+            can_mail=lambda: self.can_mail,
             clock=self.clock,
             retry=0,
             poll=0.01,
@@ -130,7 +132,7 @@ def test_stop_transcribes_the_last_part_and_assembles_the_audio(kit):
     state = kit.studio.state(sid)
     assert state["etat"] == "terminee"
     assert state["transcription"] == "A : part000 (2 octets)\nA : part001 (2 octets)"
-    assert (kit.folder(sid) / "audio.flac").exists()
+    assert (kit.folder(sid) / "audio.webm").exists()
     assert not (kit.folder(sid) / "parts").exists()
 
 
@@ -187,7 +189,7 @@ def test_a_session_left_paused_for_half_a_day_is_closed_for_good(kit):
     kit.studio.sweep()
     kit.studio.settle(sid)
     assert kit.studio.state(sid)["etat"] == "terminee"
-    assert (kit.folder(sid) / "audio.flac").exists()
+    assert (kit.folder(sid) / "audio.webm").exists()
 
 
 def test_a_restarted_server_resumes_the_session_and_accepts_the_next_chunks(kit):
@@ -536,3 +538,9 @@ def test_the_access_code_is_created_once_private_and_hard_to_guess(tmp_path):
     assert len(code.replace("-", "")) >= 20
     assert (tmp_path / "web-code").stat().st_mode & 0o077 == 0
     assert web.access_code(open_desk({"ECRIVEZ_DATA": str(tmp_path / "autre")})) != code
+
+
+def test_the_page_is_told_when_this_machine_cannot_send_mail(kit):
+    assert kit.studio.today()["mail"] is True
+    kit.can_mail = False
+    assert kit.studio.today()["mail"] is False

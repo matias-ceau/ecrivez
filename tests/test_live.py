@@ -148,3 +148,47 @@ def test_unreadable_lock_does_not_block_resume(tmp_path, pid):
     s = live.Session(tmp_path)
     s.lock.write_text(pid)
     assert not s.busy()
+
+
+def make_phone_parts(session: live.Session, suffixes: list[str]) -> None:
+    session.parts_dir.mkdir(parents=True, exist_ok=True)
+    for i, suffix in enumerate(suffixes):
+        part = session.parts_dir / f"part{i:03d}{suffix}"
+        part.write_bytes(b"x")
+        part.with_suffix(".txt").write_text("A : texte\n")
+
+
+def test_compressed_parts_are_joined_as_they_are_not_inflated_to_flac(tmp_path):
+    s = live.Session(tmp_path)
+    make_phone_parts(s, [".webm", ".webm"])
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], stdin: str | None) -> str:
+        calls.append(argv)
+        return fake_assemble(argv, stdin)
+
+    assert s.assemble(run) == tmp_path / "audio.webm"
+    assert len(calls) == 1
+    assert calls[0][-3:-1] == ["-c", "copy"]
+    assert s.audio() == tmp_path / "audio.webm"
+    assert not s.parts_dir.exists()
+
+
+def test_parts_that_cannot_be_joined_as_they_are_fall_back_to_flac(tmp_path):
+    s = live.Session(tmp_path)
+    make_phone_parts(s, [".webm", ".webm"])
+
+    def run(argv: list[str], stdin: str | None) -> str:
+        if "copy" in argv:
+            Path(argv[-1]).write_bytes(b"half")
+            raise ToolError("ffmpeg", "Non-monotonic DTS")
+        return fake_assemble(argv, stdin)
+
+    assert s.assemble(run) == tmp_path / "audio.flac"
+    assert not (tmp_path / "audio.webm").exists()
+
+
+def test_parts_of_different_formats_are_joined_into_flac(tmp_path):
+    s = live.Session(tmp_path)
+    make_phone_parts(s, [".webm", ".ogg"])
+    assert s.assemble(fake_assemble) == tmp_path / "audio.flac"

@@ -114,20 +114,41 @@ class Session:
             return True
         return True
 
+    def audio(self) -> Path | None:
+        return next(iter(sorted(self.folder.glob("audio.*"))), None)
+
     def assemble(self, run: Run = run_tool) -> Path:
-        """Join the parts into audio.flac, then drop them (only once all are transcribed)."""
+        """Join the parts into one audio file, then drop them (only once all are transcribed).
+
+        Parts that all share a compressed format (a phone's webm) are joined as they are:
+        decoding them to FLAC would make the file about ten times larger.
+        """
         parts = [
             p
             for p in self.parts()
             if p.stat().st_size > 0
             and p.with_suffix(".txt").read_text(encoding="utf-8").strip() != BROKEN_PART
         ]
+        suffixes = {p.suffix for p in parts}
         dest = self.folder / "audio.flac"
         if parts:
             listing = self.parts_dir / "liste.txt"
             listing.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
             argv = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0"]
-            run([*argv, "-i", str(listing), "-c:a", "flac", str(dest)], None)
+            argv += ["-i", str(listing)]
+            same = suffixes.pop() if len(suffixes) == 1 else ".flac"
+            if same != ".flac":
+                kept = self.folder / f"audio{same}"
+                try:
+                    run([*argv, "-c", "copy", str(kept)], None)
+                except ToolError:
+                    kept.unlink(missing_ok=True)  # a half-written join is not an audio file
+                if kept.exists() and kept.stat().st_size > 0:
+                    dest = kept
+                else:
+                    kept.unlink(missing_ok=True)
+            if dest.suffix == ".flac":
+                run([*argv, "-c:a", "flac", str(dest)], None)
             if not dest.exists() or dest.stat().st_size == 0:
                 raise ToolError("ffmpeg", "assemblage de l'audio impossible")
         _write_atomic(self.folder / TRANSCRIPT, self.transcript() + "\n")

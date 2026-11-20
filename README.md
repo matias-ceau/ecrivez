@@ -42,6 +42,17 @@ tailscale serve  --bg --https=8443 http://127.0.0.1:8377   # réseau Tailscale s
 tailscale funnel --bg --https=8443 http://127.0.0.1:8377   # ou : adresse publique
 ```
 
+Le serveur peut aussi tourner dans le téléphone lui-même (Termux, version F-Droid),
+sans rien exposer : la page s'ouvre alors sur `http://127.0.0.1:8377`. À lancer une fois
+dans Termux :
+
+```
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/matias-ceau/ecrivez/main/scripts/termux-install.sh)"
+```
+
+Sur le téléphone, la note est rédigée en ligne par le modèle `ECRIVEZ_DRAFT_MODEL`
+(`claude` n'existe pas sur Android) et le bouton de mail devient « Partager ».
+
 Détails et cas limites : [spec](docs/superpowers/specs/2026-11-19-mobile.md).
 
 ## Dossier de données
@@ -54,7 +65,7 @@ Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`
 | `exemples/*.md` | Documents déjà rédigés, modèles de style |
 | `lexique.md` | Termes à reconnaître dans la transcription |
 | `regles.md` | Consignes de style retenues |
-| `sorties/` | Par date : `note.txt`, `source.txt`, `audio.flac`, `transcription.txt` (fenêtre) |
+| `sorties/` | Par date : `note.txt`, `source.txt`, `audio.flac` (`audio.webm` depuis un navigateur), `transcription.txt` |
 
 ## Prérequis
 
@@ -67,5 +78,11 @@ Privé, hors de ce repo : `$ECRIVEZ_DATA`, par défaut `~/.local/share/ecrivez/`
   `ECRIVEZ_AUDIO_MODEL` (défaut `google/gemini-4-hydrogen`).
 - Sinon, ou avec `ECRIVEZ_TRANSCRIBER=local` : commande `whisper` (openai-whisper),
   modèle `ECRIVEZ_WHISPER_MODEL` (défaut `large-v3-turbo`).
+
+## Rédaction
+
+Par `claude -p` (abonnement). Si `ECRIVEZ_DRAFT_MODEL` est définie (par exemple
+`anthropic/claude-opus-5.5`), la note est rédigée par ce modèle via le même compte en
+ligne que la transcription : utile là où `claude` ne s'installe pas.
 
 Voir [SPEC.md](SPEC.md).

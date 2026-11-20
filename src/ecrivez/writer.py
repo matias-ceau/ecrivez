@@ -1,16 +1,21 @@
-"""Drafting and revising notes through Claude Code (`claude -p`)."""
+"""Drafting and revising notes: Claude Code (`claude -p`), or a model called online."""
 
 from __future__ import annotations
 
+import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from ecrivez.desk import Desk, SavedNote
 
 MEMORY_MARK = "===MEMOIRE==="
 
+DRAFT_ONLINE = "rédaction en ligne"
+
 Run = Callable[[list[str], str | None], str]
+Post = Callable[[str, str, dict[str, Any]], dict[str, Any]]
 
 
 class ToolError(Exception):
@@ -99,8 +104,47 @@ def _claude(system: str, content: str, run: Run) -> str:
     return run(argv, content)
 
 
-def draft(desk: Desk, source: str, template: str | None, run: Run = run_tool) -> str:
-    return _claude(_system(desk, template), source, run).strip()
+def _online(
+    system: str, content: str, model: str, env: Mapping[str, str], post: Post | None
+) -> str:
+    from ecrivez import audio  # audio imports this module
+
+    try:
+        base, key = audio._account(env)
+    except KeyError:
+        raise ToolError(DRAFT_ONLINE, "variable OPENROUTER_API_KEY absente") from None
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+    try:
+        answer = (post or audio.post_json)(
+            f"{base}/chat/completions", key, {"model": model, "messages": messages}
+        )
+    except ToolError as e:
+        raise ToolError(DRAFT_ONLINE, e.detail) from None
+    if "error" in answer or not answer.get("choices"):
+        detail = (answer.get("error") or {}).get("message") or "réponse vide"
+        raise ToolError(DRAFT_ONLINE, str(detail))
+    text = (answer["choices"][0]["message"].get("content") or "").strip()
+    if not text:
+        raise ToolError(DRAFT_ONLINE, "réponse vide")
+    return text
+
+
+def _ask(system: str, content: str, run: Run, env: Mapping[str, str], post: Post | None) -> str:
+    """Where `claude` cannot run (a phone), ECRIVEZ_DRAFT_MODEL names the model to call."""
+    if model := env.get("ECRIVEZ_DRAFT_MODEL"):
+        return _online(system, content, model, env, post)
+    return _claude(system, content, run)
+
+
+def draft(
+    desk: Desk,
+    source: str,
+    template: str | None,
+    run: Run = run_tool,
+    env: Mapping[str, str] = os.environ,
+    post: Post | None = None,
+) -> str:
+    return _ask(_system(desk, template), source, run, env, post).strip()
 
 
 def parse_revision(text: str) -> Revision:
@@ -119,9 +163,17 @@ def parse_revision(text: str) -> Revision:
     return Revision(note.strip(), lexicon, rules)
 
 
-def revise(desk: Desk, last: SavedNote, remark: str, run: Run = run_tool) -> Revision:
+def revise(
+    desk: Desk,
+    last: SavedNote,
+    remark: str,
+    run: Run = run_tool,
+    env: Mapping[str, str] = os.environ,
+    post: Post | None = None,
+) -> Revision:
     content = (
         f"=== SOURCE ===\n{last.source}\n\n=== TON DOCUMENT ===\n{last.note}\n\n"
         f"=== REMARQUE DU MÉDECIN ===\n{remark}\n"
     )
-    return parse_revision(_claude(_system(desk, last.template, revising=True), content, run))
+    system = _system(desk, last.template, revising=True)
+    return parse_revision(_ask(system, content, run, env, post))

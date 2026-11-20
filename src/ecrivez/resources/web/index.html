@@ -254,6 +254,8 @@ async function refresh() {
   try {
     const today = await api("GET", "/api/seances");
     partSeconds = today.duree_tranche;
+    canMail = today.mail !== false;
+    if (!canMail) $("mail").textContent = "Partager";
     fillTemplates(today);
     fillSessions(today.seances);
     if (sid) {
@@ -376,7 +378,21 @@ $("copy").onclick = async () => {
   catch (e) { fail("Copie impossible : sélectionnez le texte à la main."); }
 };
 
+let canMail = true;
+
+// No mail command on this machine (a phone): hand the note to the phone's own apps.
+async function shareNote() {
+  const text = $("note").textContent;
+  const title = "Note ecrivez " + new Date().toLocaleDateString("fr-FR");
+  if (navigator.share) {
+    try { await navigator.share({ title, text }); } catch (e) { /* closed without choosing */ }
+    return;
+  }
+  location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text)}`;
+}
+
 $("mail").onclick = async () => {
+  if (!canMail) return shareNote();
   $("mail").disabled = true;
   try { await api("POST", `/api/seances/${sid}/mail`); flash($("mail"), "Envoyé"); alertText = ""; }
   catch (e) { fail(e.message); }

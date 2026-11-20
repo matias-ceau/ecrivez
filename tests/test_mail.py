@@ -15,3 +15,8 @@ def test_mail_command_can_be_replaced():
     calls = []
     mail.send("n", {"ECRIVEZ_MAIL_COMMAND": "autre"}, lambda argv, stdin: calls.append(argv) or "")
     assert calls[0][0] == "autre"
+
+
+def test_mail_is_unavailable_where_the_command_is_not_installed():
+    assert mail.available({"ECRIVEZ_MAIL_COMMAND": "commande-qui-n-existe-pas"}) is False
+    assert mail.available({"ECRIVEZ_MAIL_COMMAND": "sh"}) is True
