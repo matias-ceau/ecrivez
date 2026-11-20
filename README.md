@@ -43,8 +43,9 @@ tailscale funnel --bg --https=8443 http://127.0.0.1:8377   # ou : adresse publiq
 ```
 
 Avec `ecrivez-web --auto`, la note est rédigée puis envoyée par mail dès que la séance
-est finie, sans rien toucher (adresse : celle de la commande de mail, ou
-`ECRIVEZ_MAIL_TO`). La page se rouvre et enregistre même quand la maison est injoignable :
+est finie, sans rien toucher. Le menu « Mail » de la page choisit l'adresse : l'habituelle
+(celle de la commande de mail, ou `ECRIVEZ_MAIL_TO`), une de `ECRIVEZ_MAIL_CHOICES`
+(séparées par des virgules), une adresse tapée, ou pas de mail. La page se rouvre et enregistre même quand la maison est injoignable :
 l'audio reste dans le téléphone et part à la prochaine ouverture de la page avec du réseau.
 
 Détails et cas limites : [spec](docs/superpowers/specs/2026-11-19-mobile.md).

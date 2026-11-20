@@ -86,12 +86,21 @@ class Refused(Exception):
         self.extra = extra
 
 
+NO_MAIL = "aucun"
+
+
 @dataclass(frozen=True)
 class Wish:
-    """What the doctor chose on the page for the note: a template (None: free) and a text."""
+    """What the doctor chose on the page for the note: a template (None: free), a text,
+    and where to mail it ("": the usual address, NO_MAIL, an address; None: not said)."""
 
     template: str | None = None
     text: str = ""
+    mail: str | None = None
+
+
+class Send(Protocol):
+    def __call__(self, note: str, *, to: str | None = None) -> object: ...
 
 
 @dataclass
@@ -118,8 +127,9 @@ class Studio:
         transcriber: Callable[[], live.TranscribePart],
         run: Run = run_tool,
         draft: Draft = writer.draft,
-        send: Callable[[str], object] = mail.send,
+        send: Send = mail.send,
         can_mail: Callable[[], bool] = mail.available,
+        addresses: Callable[[], list[str]] = mail.choices,
         auto: bool = False,
         clock: Callable[[], float] = time.time,
         part_seconds: int = live.PART_SECONDS,
@@ -134,6 +144,7 @@ class Studio:
         self.draft = draft
         self.send = send
         self.can_mail = can_mail
+        self.addresses = addresses
         self.auto = auto
         self.clock = clock
         self.part_seconds = part_seconds
@@ -211,6 +222,8 @@ class Studio:
             return
         if wish.template is None or wish.template in self.desk.templates():
             meta["trame"] = wish.template
+        if wish.mail is not None and (wish.mail in ("", NO_MAIL) or mail.valid(wish.mail)):
+            meta["destinataire"] = wish.mail
         text = wish.text.strip()
         if text:
             live._write_atomic(folder / TEXT_FILE, text + "\n")
@@ -443,6 +456,7 @@ class Studio:
                 "redaction": bool(running and running.drafting),
                 "auto": meta.get("auto") == "attente",
                 "envoye": self._hour(meta.get("envoye")),
+                "envoye_a": meta.get("envoye_a") or None,
                 "erreur": meta.get("erreur"),
                 "message": running.message if running else "",
             }
@@ -470,6 +484,7 @@ class Studio:
             "trame": _current_template(self.desk),
             "duree_tranche": self.part_seconds,
             "mail": self.can_mail(),
+            "adresses": self.addresses(),
             "auto": self.auto,
         }
 
@@ -526,20 +541,31 @@ class Studio:
             running.drafting = False
         self._auto_step(self._sid(folder))
 
-    def send_mail(self, sid: str) -> None:
+    @staticmethod
+    def _to(meta: dict[str, Any]) -> str | None:
+        """The address wished for this session; None is the mail command's usual one."""
+        wished = meta.get("destinataire")
+        return wished if wished and wished != NO_MAIL else None
+
+    def send_mail(self, sid: str, to: str | None = None) -> None:
+        """Mail the note to `to` ("": the usual address), or where the session wished."""
         folder = self._folder(sid)
         note = self._note(folder)
         if not note:
             raise Refused(409, "Pas encore de note à envoyer.")
+        if to and not mail.valid(to):
+            raise Refused(400, "Adresse mail invalide.")
+        target = self._to(self._load(folder)) if to is None else to or None
         try:
-            self.send(note)
+            self.send(note, to=target)
         except ToolError as e:
             raise Refused(502, f"Envoi impossible : {e}") from None
         with self._mutex:
-            self._sent(folder, self._load(folder))
+            self._sent(folder, self._load(folder), target)
 
-    def _sent(self, folder: Path, meta: dict[str, Any]) -> None:
+    def _sent(self, folder: Path, meta: dict[str, Any], to: str | None) -> None:
         meta["envoye"] = self.clock()
+        meta["envoye_a"] = to or ""
         if meta.get("auto") == "attente":
             meta["auto"] = "fait"
         meta.pop("erreur", None)
@@ -573,10 +599,14 @@ class Studio:
             if self.clock() < meta.get("auto_apres", 0):
                 return
             note = self._note(folder)
+            if note and meta.get("destinataire") == NO_MAIL:
+                meta["auto"] = "fait"  # asked to stay on the page
+                self._store(folder, meta)
+                return
             if note:
                 running.mailing = True
                 thread = threading.Thread(
-                    target=self._mail, args=(folder, running, note), daemon=True
+                    target=self._mail, args=(folder, running, note, self._to(meta)), daemon=True
                 )
                 running.threads.append(thread)
                 thread.start()
@@ -596,10 +626,10 @@ class Studio:
                 meta.update(auto="abandon", erreur="Rien d'audible : pas de note automatique.")
                 self._store(folder, meta)
 
-    def _mail(self, folder: Path, running: _Running, note: str) -> None:
+    def _mail(self, folder: Path, running: _Running, note: str, to: str | None) -> None:
         error = None
         try:
-            self.send(note)
+            self.send(note, to=to)
         except ToolError as e:
             error = f"Envoi automatique par mail impossible : {e}. La note est prête."
         with self._mutex:
@@ -609,7 +639,7 @@ class Studio:
                 self._later(meta)
                 self._store(folder, meta)
             else:
-                self._sent(folder, meta)
+                self._sent(folder, meta, to)
             running.mailing = False
 
     # -- life cycle --------------------------------------------------------------------
@@ -732,7 +762,12 @@ def _wish_of(data: bytes) -> Wish | None:
         return None
     try:
         asked = json.loads(data)
-        return Wish(asked.get("trame") or None, str(asked.get("texte") or ""))
+        to = asked.get("mail")
+        return Wish(
+            asked.get("trame") or None,
+            str(asked.get("texte") or ""),
+            None if to is None else str(to).strip(),
+        )
     except (ValueError, AttributeError):
         raise Refused(400, "Demande illisible.") from None
 
@@ -866,7 +901,11 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
                     raise Refused(400, "Demande illisible.") from None
                 studio.start_draft(args[0], template, text)
                 return 202, {"ok": True}
-            studio.send_mail(args[0])
+            try:
+                to = json.loads(data or b"{}").get("mail")
+            except (ValueError, AttributeError):
+                raise Refused(400, "Demande illisible.") from None
+            studio.send_mail(args[0], None if to is None else str(to).strip())
             return 200, {"ok": True}
 
         def do_GET(self) -> None:

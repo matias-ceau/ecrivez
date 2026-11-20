@@ -11,12 +11,13 @@
   :root { --bg:#100F0F; --field:#282726; --line:#403E3C; --fg:#CECDC3; --dim:#878580;
           --red:#D14D41; --blue:#4385BE; --green:#879A39; }
   * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; background:var(--bg); color:var(--fg);
          font:16px/1.45 system-ui, "Noto Sans", sans-serif;
          padding:16px 16px calc(24px + env(safe-area-inset-bottom)); max-width:720px; margin-inline:auto; }
   h2 { font-size:13px; font-weight:600; color:var(--dim); text-transform:uppercase;
        letter-spacing:.06em; margin:22px 0 6px; }
-  button, select, textarea, .file { font:inherit; color:var(--fg); background:var(--field);
+  button, select, textarea, input[type=email], .file { font:inherit; color:var(--fg); background:var(--field);
        border:1px solid var(--line); border-radius:10px; }
   button, .file { padding:12px 14px; cursor:pointer; }
   button:disabled { opacity:.45; }
@@ -25,7 +26,9 @@
   #rec.on { background:var(--red); color:#fff; border-color:var(--red); }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px; }
   #clock { font-size:30px; font-variant-numeric:tabular-nums; flex:1; }
-  select { padding:10px; }
+  select, input[type=email] { padding:10px; }
+  #to-other { flex:1; min-width:180px; }
+  #to-hint { font-size:14px; margin-top:6px; }
   #status { margin-top:12px; min-height:1.5em; }
   #queue { color:var(--dim); font-size:14px; }
   .alert { color:var(--red); font-weight:600; }
@@ -47,6 +50,11 @@
   <div id="clock">00:00</div>
   <label>Trame <select id="template"></select></label>
 </div>
+<div class="row" id="to-row">
+  <label>Mail <select id="to"></select></label>
+  <input id="to-other" type="email" placeholder="adresse@exemple.fr" autocomplete="email" hidden>
+</div>
+<div id="to-hint"></div>
 <div id="status">Chargement…</div>
 <div id="queue"></div>
 
@@ -165,7 +173,16 @@ function localId() {
   const hour = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   return `${day}_${hour}-9${p(Math.floor(Math.random() * 1000), 3)}`;  // never a server-made name
 }
-const wish = () => JSON.stringify({trame: $("template").value || null, texte: $("text").value});
+// Where the note is mailed: "" is the usual address, "aucun" keeps it on the page.
+const ADDRESS = /^[^\s@,;<>"'-][^\s@,;<>"']*@[^\s@,;<>"'.]+(\.[^\s@,;<>"'.]+)+$/;
+function recipient() {
+  const choice = $("to").value;
+  if (choice !== "autre") return choice;
+  const typed = $("to-other").value.trim();
+  return ADDRESS.test(typed) ? typed : "";   // never a half-typed address
+}
+const wish = () => JSON.stringify(
+  {trame: $("template").value || null, texte: $("text").value, mail: recipient()});
 
 function startPart(r) {
   const {mime, ext} = format();
@@ -262,10 +279,13 @@ async function refresh() {
   try {
     const today = await api("GET", "/api/seances");
     partSeconds = today.duree_tranche;
-    localStorage.setItem("trames", JSON.stringify({trames: today.trames, trame: today.trame}));
+    localStorage.setItem("trames", JSON.stringify(
+      {trames: today.trames, trame: today.trame, adresses: today.adresses}));
     canMail = today.mail !== false;
     if (!canMail) $("mail").textContent = "Partager";
+    $("to-row").hidden = $("to-hint").hidden = !canMail;
     fillTemplates(today);
+    fillAddresses(today.adresses);
     fillSessions(today.seances);
     if (sid) {
       try { state = await api("GET", `/api/seances/${sid}`); }
@@ -285,7 +305,36 @@ function fillTemplates(today) {
   select.value = localStorage.getItem("trame") ?? (today.trame || "");
 }
 $("template").onchange = () => localStorage.setItem("trame", $("template").value);
-try { fillTemplates(JSON.parse(localStorage.getItem("trames"))); } catch (e) { /* first visit */ }
+
+let offered = null;                       // the addresses the menu was built with
+function fillAddresses(addresses) {
+  const listed = JSON.stringify(addresses || []);
+  if (listed === offered) return;
+  offered = listed;
+  const select = $("to");
+  select.replaceChildren(new Option("adresse habituelle", ""),
+                         ...(addresses || []).map(a => new Option(a, a)),
+                         new Option("autre…", "autre"), new Option("pas de mail", "aucun"));
+  const saved = localStorage.getItem("mail") || "";
+  select.value = [...select.options].some(o => o.value === saved) ? saved : "";
+  $("to-other").value = localStorage.getItem("mail_autre") || "";
+  showRecipient();
+}
+function showRecipient() {
+  const choice = $("to").value, typed = $("to-other").value.trim();
+  $("to-other").hidden = choice !== "autre";
+  const unfinished = choice === "autre" && !ADDRESS.test(typed);
+  $("to-hint").className = unfinished ? "alert" : "tag";
+  $("to-hint").textContent = unfinished ? "Adresse incomplète : la note irait à l'adresse habituelle."
+    : choice === "aucun" ? "La note sera rédigée et restera sur cette page." : "";
+}
+$("to").onchange = () => { localStorage.setItem("mail", $("to").value); showRecipient(); };
+$("to-other").oninput = () => { localStorage.setItem("mail_autre", $("to-other").value.trim()); showRecipient(); };
+try {
+  const kept = JSON.parse(localStorage.getItem("trames"));
+  fillTemplates(kept);
+  fillAddresses(kept.adresses);
+} catch (e) { /* first visit */ }
 
 function fillSessions(sessions) {
   const box = $("sessions");
@@ -316,7 +365,7 @@ function render() {
     else if (s.etat === "pause") text = "En pause : plus rien reçu du téléphone. Ce qui est arrivé est transcrit.";
     else if (s.etat === "transcription") text = "Transcription" + progress;
     else if (s.etat === "terminee") {
-      if (s.envoye) text = `Note envoyée par mail à ${s.envoye}.`;
+      if (s.envoye) text = `Note envoyée par mail à ${s.envoye} (${s.envoye_a || "adresse habituelle"}).`;
       else if (s.note) text = s.auto ? "Note prête, envoi par mail en cours…" : "Note prête.";
       else text = s.auto ? "Transcription terminée, la note arrive toute seule…" : "Transcription terminée.";
     }
@@ -409,7 +458,12 @@ async function shareNote() {
 $("mail").onclick = async () => {
   if (!canMail) return shareNote();
   $("mail").disabled = true;
-  try { await api("POST", `/api/seances/${sid}/mail`); flash($("mail"), "Envoyé"); alertText = ""; }
+  const to = recipient() === "aucun" ? "" : recipient();   // the button always sends somewhere
+  try {
+    await api("POST", `/api/seances/${sid}/mail`, JSON.stringify({mail: to}));
+    flash($("mail"), "Envoyé");
+    alertText = "";
+  }
   catch (e) { fail(e.message); }
   render();
 };

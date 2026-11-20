@@ -47,6 +47,8 @@ class Kit:
         self.clock = Clock()
         self.drafted: list[tuple[str, str | None]] = []
         self.mailed: list[str] = []
+        self.sent_to: list[str | None] = []
+        self.addresses: list[str] = []
         self.can_mail = True
         self.auto = False
         self.mail_error: ToolError | None = None
@@ -63,15 +65,17 @@ class Kit:
             send=self.send,
             auto=self.auto,
             can_mail=lambda: self.can_mail,
+            addresses=lambda: self.addresses,
             clock=self.clock,
             retry=0,
             poll=0.01,
         )
 
-    def send(self, note: str) -> None:
+    def send(self, note: str, *, to: str | None = None) -> None:
         if self.mail_error:
             raise self.mail_error
         self.mailed.append(note)
+        self.sent_to.append(to)
 
     def automatic(self) -> None:
         self.auto = True
@@ -519,6 +523,85 @@ def test_mailing_by_hand_first_prevents_a_second_automatic_mail(kit):
     assert kit.mailed == ["NOTE"]
 
 
+# -- choosing where the note is mailed -------------------------------------------------
+
+
+def auto_session(kit: Kit, wish: web.Wish) -> str:
+    kit.automatic()
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid, wish)
+    kit.studio.settle(sid)
+    return sid
+
+
+def test_the_automatic_note_goes_to_the_address_chosen_on_the_page(kit):
+    sid = auto_session(kit, web.Wish("tca", mail="hopital@example.org"))
+    assert kit.mailed == ["NOTE"] and kit.sent_to == ["hopital@example.org"]
+    assert kit.studio.state(sid)["envoye_a"] == "hopital@example.org"
+
+
+def test_without_a_chosen_address_the_note_goes_to_the_usual_one(kit):
+    sid = auto_session(kit, web.Wish("tca", mail=""))
+    assert kit.sent_to == [None]
+    state = kit.studio.state(sid)
+    assert state["envoye"] and state["envoye_a"] is None
+
+
+@pytest.mark.parametrize(
+    "address", ["pas une adresse", "-o@example.org", "a@b", "a@example.org,b@example.org"]
+)
+def test_a_malformed_address_is_ignored_and_the_note_goes_to_the_usual_one(kit, address):
+    auto_session(kit, web.Wish("tca", mail=address))
+    assert kit.mailed == ["NOTE"] and kit.sent_to == [None]
+
+
+def test_no_mail_can_be_chosen_and_the_note_still_gets_drafted(kit):
+    sid = auto_session(kit, web.Wish("tca", mail=web.NO_MAIL))
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    state = kit.studio.state(sid)
+    assert state["note"] == "NOTE" and state["envoye"] is None and state["auto"] is False
+    assert kit.mailed == []
+
+
+def test_the_address_chosen_when_stopping_replaces_the_one_from_the_start(kit):
+    kit.automatic()
+    sid = kit.studio.create(web.Wish("tca", mail="debut@example.org"))
+    kit.studio.chunk(sid, 0, 0, b"ab")
+    kit.studio.finish(sid, web.Wish("tca", mail="fin@example.org"))
+    kit.studio.settle(sid)
+    assert kit.sent_to == ["fin@example.org"]
+
+
+def test_the_mail_button_sends_where_the_page_says(kit):
+    sid = finished(kit)
+    kit.studio.start_draft(sid, None, "")
+    kit.studio.settle(sid)
+    kit.studio.send_mail(sid, "ailleurs@example.org")
+    kit.studio.send_mail(sid, "")
+    assert kit.sent_to == ["ailleurs@example.org", None]
+    with pytest.raises(web.Refused) as e:
+        kit.studio.send_mail(sid, "pas une adresse")
+    assert e.value.status == 400 and len(kit.mailed) == 2
+
+
+def test_the_mail_button_without_a_choice_uses_the_one_of_the_session(kit):
+    sid = auto_session(kit, web.Wish("tca", mail=web.NO_MAIL))
+    kit.studio.send_mail(sid)
+    assert kit.sent_to == [None]
+    other = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(other, web.Wish("tca", mail="hopital@example.org"))
+    kit.studio.settle(other)
+    kit.studio.send_mail(other)
+    assert kit.sent_to == [None, "hopital@example.org", "hopital@example.org"]
+
+
+def test_the_page_is_given_the_addresses_to_offer(kit):
+    assert kit.studio.today()["adresses"] == []
+    kit.addresses = ["hopital@example.org"]
+    assert kit.studio.today()["adresses"] == ["hopital@example.org"]
+
+
 def test_after_a_restart_a_note_still_owed_is_drafted_and_mailed(kit):
     kit.automatic()
     kit.draft_error = ToolError("claude", "hors ligne")
@@ -725,6 +808,22 @@ def test_the_page_is_told_when_this_machine_cannot_send_mail(kit):
     assert kit.studio.today()["mail"] is True
     kit.can_mail = False
     assert kit.studio.today()["mail"] is False
+
+
+def test_the_address_travels_over_http_with_the_stop_and_with_the_button(kit, server):
+    kit.studio.auto = True
+    sid = call("POST", f"{server}/api/seances")[1]["id"]
+    assert call("PUT", f"{server}/api/seances/{sid}/tranches/0/0", b"ab")[0] == 200
+    body = json.dumps({"trame": "tca", "texte": "", "mail": " hopital@example.org "}).encode()
+    assert call("POST", f"{server}/api/seances/{sid}/fin", body)[0] == 200
+    kit.studio.settle(sid)
+    assert kit.sent_to == ["hopital@example.org"]
+    assert call("GET", f"{server}/api/seances/{sid}")[1]["envoye_a"] == "hopital@example.org"
+    again = json.dumps({"mail": ""}).encode()
+    assert call("POST", f"{server}/api/seances/{sid}/mail", again)[0] == 200
+    bad = json.dumps({"mail": "nulle part"}).encode()
+    assert call("POST", f"{server}/api/seances/{sid}/mail", bad)[0] == 400
+    assert kit.sent_to == ["hopital@example.org", None]
 
 
 def test_a_session_recorded_offline_arrives_over_http_and_is_mailed(kit, server):
