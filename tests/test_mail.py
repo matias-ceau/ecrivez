@@ -20,3 +20,17 @@ def test_mail_command_can_be_replaced():
 def test_mail_is_unavailable_where_the_command_is_not_installed():
     assert mail.available({"ECRIVEZ_MAIL_COMMAND": "commande-qui-n-existe-pas"}) is False
     assert mail.available({"ECRIVEZ_MAIL_COMMAND": "sh"}) is True
+
+
+def test_the_note_goes_to_the_address_set_for_it():
+    calls = []
+    env = {"ECRIVEZ_MAIL_TO": "ailleurs@example.org"}
+    mail.send("n", env, lambda argv, stdin: calls.append(argv) or "")
+    argv = calls[0]
+    assert argv[argv.index("--email-receiver") + 1] == "ailleurs@example.org"
+
+
+def test_without_an_address_the_mail_command_keeps_its_own_default():
+    calls = []
+    mail.send("n", {}, lambda argv, stdin: calls.append(argv) or "")
+    assert "--email-receiver" not in calls[0]

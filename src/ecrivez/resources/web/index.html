@@ -125,7 +125,9 @@ async function pump() {
       let answer;
       try {
         answer = v.type === "fin"
-          ? await fetch(`/api/seances/${v.sid}/fin`, {method: "POST"})
+          ? await fetch(`/api/seances/${v.sid}/fin`, {method: "POST", body: v.body})
+          : v.type === "creation"
+          ? await fetch(`/api/seances/${v.sid}`, {method: "PUT", body: v.body})
           : await fetch(`/api/seances/${v.sid}/tranches/${v.tranche}/${v.rang}?ext=${v.ext}`,
                         {method: "PUT", body: v.blob});
       } catch (e) { break; }                       // no network: try again later
@@ -138,11 +140,14 @@ async function pump() {
     showQueue();
   }
 }
+let queued = 0;
 async function showQueue() {
-  const n = await waiting();
+  const n = queued = await waiting();
   $("queue").textContent = n ? `${n} morceau${n > 1 ? "x" : ""} en attente d'envoi` : "";
 }
 setInterval(pump, 3000);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 addEventListener("online", pump);
 
 // -- recording ----------------------------------------------------------------------
@@ -153,6 +158,14 @@ function format() {
     if (MediaRecorder.isTypeSupported(mime)) return {mime, ext};
   return null;
 }
+
+function localId() {
+  const d = new Date(), p = (n, width = 2) => String(n).padStart(width, "0");
+  const day = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const hour = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${day}_${hour}-9${p(Math.floor(Math.random() * 1000), 3)}`;  // never a server-made name
+}
+const wish = () => JSON.stringify({trame: $("template").value || null, texte: $("text").value});
 
 function startPart(r) {
   const {mime, ext} = format();
@@ -176,16 +189,11 @@ async function start() {
   } catch (e) {
     return fail("Micro refusé par le navigateur. Autorisez-le, ou utilisez « Envoyer un fichier audio ».");
   }
-  let created;
-  try {
-    created = await api("POST", "/api/seances");
-  } catch (e) {
-    stream.getTracks().forEach(t => t.stop());
-    return fail("Serveur injoignable : enregistrez avec le dictaphone et envoyez le fichier plus tard.");
-  }
+  const id = localId();                     // no server needed: it learns the name later
+  await enqueue({type: "creation", sid: id, body: wish()});
   alertText = "";
-  show(created.id);
-  const r = recording = {sid: created.id, stream, tranche: 0, started: Date.now()};
+  show(id);
+  const r = recording = {sid: id, stream, tranche: 0, started: Date.now()};
   startPart(r);
   r.rotate = setInterval(() => {            // new part first, then close the old one: no gap
     const old = r.recorder;
@@ -210,7 +218,7 @@ async function stop(reason) {
     r.recorder.state === "inactive" ? done() : r.recorder.stop();
   });
   r.stream.getTracks().forEach(t => t.stop());
-  await enqueue({type: "fin", sid: r.sid});
+  await enqueue({type: "fin", sid: r.sid, body: wish()});
   if (wakeLock) wakeLock.release().catch(() => {});
   alertText = reason || "";
   pump();
@@ -254,13 +262,14 @@ async function refresh() {
   try {
     const today = await api("GET", "/api/seances");
     partSeconds = today.duree_tranche;
+    localStorage.setItem("trames", JSON.stringify({trames: today.trames, trame: today.trame}));
     canMail = today.mail !== false;
     if (!canMail) $("mail").textContent = "Partager";
     fillTemplates(today);
     fillSessions(today.seances);
     if (sid) {
       try { state = await api("GET", `/api/seances/${sid}`); }
-      catch (e) { show(null); }
+      catch (e) { if (!recording && !queued) show(null); }   // not known there yet: still in the queue
     }
     offline = false;
   } catch (e) { offline = true; }
@@ -276,6 +285,7 @@ function fillTemplates(today) {
   select.value = localStorage.getItem("trame") ?? (today.trame || "");
 }
 $("template").onchange = () => localStorage.setItem("trame", $("template").value);
+try { fillTemplates(JSON.parse(localStorage.getItem("trames"))); } catch (e) { /* first visit */ }
 
 function fillSessions(sessions) {
   const box = $("sessions");
@@ -305,7 +315,11 @@ function render() {
     if (s.etat === "enregistrement") text = (mine ? "Enregistrement en cours" : "Séance ouverte, enregistrée ailleurs ou interrompue") + progress;
     else if (s.etat === "pause") text = "En pause : plus rien reçu du téléphone. Ce qui est arrivé est transcrit.";
     else if (s.etat === "transcription") text = "Transcription" + progress;
-    else if (s.etat === "terminee") text = s.note ? "Note prête." : "Transcription terminée.";
+    else if (s.etat === "terminee") {
+      if (s.envoye) text = `Note envoyée par mail à ${s.envoye}.`;
+      else if (s.note) text = s.auto ? "Note prête, envoi par mail en cours…" : "Note prête.";
+      else text = s.auto ? "Transcription terminée, la note arrive toute seule…" : "Transcription terminée.";
+    }
     if (s.redaction) text = "Rédaction de la note…";
     if (s.erreur) text = s.erreur;
     $("transcript").textContent = s.transcription;
@@ -315,7 +329,8 @@ function render() {
     $("note").textContent = "";
   }
   if (locked) text = "Code d'accès redemandé. " + (recording ? "L'enregistrement continue ; arrêtez puis rouvrez la page, l'audio partira ensuite." : "");
-  if (offline) text = "Serveur injoignable. " + (recording ? "L'enregistrement continue, l'audio partira au retour du réseau." : "");
+  if (offline) text = "Maison injoignable. " + (recording ? "L'enregistrement continue et reste dans le téléphone."
+    : queued ? "L'enregistrement est gardé dans le téléphone : rouvrez cette page quand la maison est joignable, il partira tout seul." : "");
   const status = $("status");
   status.textContent = alertText || text;
   status.className = alertText || (s && s.erreur) || offline || locked ? "alert" : "";
@@ -345,7 +360,7 @@ $("file").onchange = async () => {
   $("file").value = "";
   if (!file || recording) return;
   try {
-    const created = await api("POST", "/api/seances");
+    const created = await api("POST", "/api/seances", wish());
     show(created.id);
     await new Promise((done, failed) => {
       const xhr = new XMLHttpRequest();

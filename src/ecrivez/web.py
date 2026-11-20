@@ -40,6 +40,8 @@ UPLOAD_FORMATS = ("mp3", "m4a", "mp4", "aac", "wav", "ogg", "opus", "flac", "web
 MAX_CHUNK = 8 * 1024 * 1024
 MAX_UPLOAD = 1024 * 1024 * 1024
 TEXT_HEADING = "Texte joint par le médecin :"
+TEXT_FILE = "texte.txt"
+AUTO_TRIES = 6
 TRANSCRIPT_HEADING = "Transcription de la consultation :"
 
 # Phases of a session, kept in web.json:
@@ -48,6 +50,9 @@ TRANSCRIPT_HEADING = "Transcription de la consultation :"
 #   pause      nothing received for a while: everything is transcribed, more is still accepted
 #   decoupage  an uploaded file is being cut into parts
 #   close      no more audio will come (transcription and assembly may still be running)
+#
+# With automatic notes, web.json also carries "auto": "attente" (the note is still to be
+# drafted or mailed), then "fait", or "abandon" after too many failures.
 
 
 class Readable(Protocol):
@@ -81,6 +86,14 @@ class Refused(Exception):
         self.extra = extra
 
 
+@dataclass(frozen=True)
+class Wish:
+    """What the doctor chose on the page for the note: a template (None: free) and a text."""
+
+    template: str | None = None
+    text: str = ""
+
+
 @dataclass
 class _Running:
     """What this process holds in memory for one session."""
@@ -92,6 +105,7 @@ class _Running:
     threads: list[threading.Thread] = field(default_factory=list)
     message: str = ""
     drafting: bool = False
+    mailing: bool = False
 
 
 Draft = Callable[[Desk, str, str | None], str]
@@ -106,6 +120,7 @@ class Studio:
         draft: Draft = writer.draft,
         send: Callable[[str], object] = mail.send,
         can_mail: Callable[[], bool] = mail.available,
+        auto: bool = False,
         clock: Callable[[], float] = time.time,
         part_seconds: int = live.PART_SECONDS,
         idle_pause: float = 600,
@@ -119,6 +134,7 @@ class Studio:
         self.draft = draft
         self.send = send
         self.can_mail = can_mail
+        self.auto = auto
         self.clock = clock
         self.part_seconds = part_seconds
         self.idle_pause = idle_pause
@@ -136,6 +152,13 @@ class Studio:
         if folder is None or not folder.is_dir():
             raise Refused(404, "Séance introuvable.")
         return folder
+
+    def _exists(self, sid: str) -> bool:
+        try:
+            self._folder(sid)
+        except Refused:
+            return False
+        return True
 
     @staticmethod
     def _sid(folder: Path) -> str:
@@ -166,6 +189,7 @@ class Studio:
 
         def notify(message: str) -> None:
             running.message = message
+            self._auto_step(sid)
 
         running.session.take()
         running.worker = live.Worker(
@@ -182,10 +206,40 @@ class Studio:
 
     # -- recording ---------------------------------------------------------------------
 
-    def create(self) -> str:
-        folder = self.desk.new_output_dir()
+    def _wish(self, folder: Path, meta: dict[str, Any], wish: Wish | None) -> None:
+        if wish is None:
+            return
+        if wish.template is None or wish.template in self.desk.templates():
+            meta["trame"] = wish.template
+        text = wish.text.strip()
+        if text:
+            live._write_atomic(folder / TEXT_FILE, text + "\n")
+        else:
+            (folder / TEXT_FILE).unlink(missing_ok=True)
+
+    def create(self, wish: Wish | None = None, sid: str | None = None) -> str:
+        """Open a session. A phone that recorded offline names it itself: twice is harmless."""
+        if sid is None:
+            folder = self.desk.new_output_dir()
+        else:
+            match = SESSION_ID.match(sid)
+            if match is None:
+                raise Refused(400, "Nom de séance invalide.")
+            try:
+                datetime.strptime(f"{match[1]} {match[2][:6]}", "%Y-%m-%d %H%M%S")
+            except ValueError:
+                raise Refused(400, "Nom de séance invalide.") from None
+            folder = self.desk.root / "sorties" / match[1] / match[2]
         with self._mutex:
-            self._store(folder, {**self._load(folder), "phase": "nouvelle", "vu": self.clock()})
+            if sid is not None:
+                if (folder / STATE).exists():
+                    return sid
+                if folder.exists():
+                    raise Refused(409, "Ce nom de séance est déjà pris.")
+                folder.mkdir(parents=True)
+            meta = {**self._load(folder), "phase": "nouvelle", "vu": self.clock()}
+            self._wish(folder, meta, wish)
+            self._store(folder, meta)
         return self._sid(folder)
 
     def chunk(self, sid: str, tranche: int, rang: int, data: bytes, ext: str = "webm") -> str:
@@ -193,6 +247,8 @@ class Studio:
         if ext not in CHUNK_FORMATS:
             raise Refused(400, "Format audio non pris en charge.")
         with self._mutex:
+            if SESSION_ID.match(sid) and not self._exists(sid):
+                self.create(sid=sid)  # audio recorded offline must never wait for anything
             folder = self._folder(sid)
             meta = self._load(folder)
             if meta["phase"] in ("close", "decoupage"):
@@ -225,7 +281,7 @@ class Studio:
             self._work(sid, running)
         return "recu"
 
-    def finish(self, sid: str) -> None:
+    def finish(self, sid: str, wish: Wish | None = None) -> None:
         with self._mutex:
             folder = self._folder(sid)
             meta = self._load(folder)
@@ -233,6 +289,9 @@ class Studio:
                 return
             had_audio = meta["phase"] != "nouvelle"
             meta["phase"] = "close"
+            self._wish(folder, meta, wish)
+            if had_audio and self.auto:
+                meta["auto"] = "attente"
             self._store(folder, meta)
             if had_audio:
                 running = self._of(sid, folder)
@@ -253,6 +312,8 @@ class Studio:
                     running.recording.clear()  # the last part gets transcribed, nothing assembled
                 elif meta["phase"] == "pause" and silent > self.idle_close:
                     self.finish(sid)
+            for sid in list(self._running):
+                self._auto_step(sid)
 
     def resume(self) -> None:
         """After a restart: pick every unfinished session up where it was."""
@@ -271,10 +332,14 @@ class Studio:
                     self._work(sid, running)
                 elif meta["phase"] == "decoupage":
                     self._cut_later(sid, folder)
+                elif meta.get("auto") == "attente":
+                    self._of(sid, folder)
             for session in live.unfinished_sessions(self.desk.root):
                 sid = self._sid(session.folder)
                 if sid not in self._running:
                     self._work(sid, self._of(sid, session.folder))
+            for sid in list(self._running):
+                self._auto_step(sid)
 
     # -- sending a file ----------------------------------------------------------------
 
@@ -332,6 +397,8 @@ class Studio:
             meta = {**self._load(folder), "phase": "close"}
             if error:
                 meta["erreur"] = error
+            elif self.auto:
+                meta["auto"] = "attente"
             self._store(folder, meta)
             if not error:
                 self._work(sid, running)
@@ -356,6 +423,10 @@ class Studio:
         path = folder / "note.txt"
         return path.read_text(encoding="utf-8").strip() if path.exists() else None
 
+    @staticmethod
+    def _hour(moment: float | None) -> str | None:
+        return f"{datetime.fromtimestamp(moment):%H:%M}" if moment else None
+
     def state(self, sid: str) -> dict[str, Any]:
         with self._mutex:
             folder = self._folder(sid)
@@ -370,6 +441,8 @@ class Studio:
                 "transcrites": len(session.texts()),
                 "note": self._note(folder),
                 "redaction": bool(running and running.drafting),
+                "auto": meta.get("auto") == "attente",
+                "envoye": self._hour(meta.get("envoye")),
                 "erreur": meta.get("erreur"),
                 "message": running.message if running else "",
             }
@@ -397,6 +470,7 @@ class Studio:
             "trame": _current_template(self.desk),
             "duree_tranche": self.part_seconds,
             "mail": self.can_mail(),
+            "auto": self.auto,
         }
 
     # -- the note ----------------------------------------------------------------------
@@ -405,31 +479,36 @@ class Studio:
         with self._mutex:
             folder = self._folder(sid)
             meta = self._load(folder)
-            session = live.Session(folder)
             running = self._of(sid, folder)
             if running.drafting:
                 raise Refused(409, "La rédaction est déjà en cours.")
-            if meta["phase"] in ("active", "decoupage") or session.pending(recording=False):
+            pending = running.session.pending(recording=False)
+            if meta["phase"] in ("active", "decoupage") or pending:
                 raise Refused(409, "La transcription n'est pas finie.")
             if template is not None:
                 try:
                     self.desk.template(template)
                 except UnknownTemplate:
                     raise Refused(400, f"Trame inconnue : {template}") from None
-            heard, text = session.transcript(), text.strip()
-            if not heard and not text:
-                raise Refused(400, "Rien à rédiger : ni transcription ni texte.")
-            source = heard or text
-            if heard and text:
-                source = f"{TRANSCRIPT_HEADING}\n{heard}\n\n{TEXT_HEADING}\n{text}"
-            running.drafting = True
-            meta.pop("erreur", None)
-            self._store(folder, meta)
-            thread = threading.Thread(
-                target=self._draft, args=(folder, running, source, template), daemon=True
-            )
-            running.threads.append(thread)
-            thread.start()
+            self._begin_draft(folder, meta, running, template, text)
+
+    def _begin_draft(
+        self, folder: Path, meta: dict[str, Any], running: _Running, template: str | None, text: str
+    ) -> None:
+        heard, text = running.session.transcript(), text.strip()
+        if not heard and not text:
+            raise Refused(400, "Rien à rédiger : ni transcription ni texte.")
+        source = heard or text
+        if heard and text:
+            source = f"{TRANSCRIPT_HEADING}\n{heard}\n\n{TEXT_HEADING}\n{text}"
+        running.drafting = True
+        meta.pop("erreur", None)
+        self._store(folder, meta)
+        thread = threading.Thread(
+            target=self._draft, args=(folder, running, source, template), daemon=True
+        )
+        running.threads.append(thread)
+        thread.start()
 
     def _draft(self, folder: Path, running: _Running, source: str, template: str | None) -> None:
         error = None
@@ -440,17 +519,98 @@ class Studio:
             error = f"Rédaction impossible : {e}. La transcription et l'audio sont intacts."
         with self._mutex:
             if error:
-                self._store(folder, {**self._load(folder), "erreur": error})
+                meta = self._load(folder)
+                meta["erreur"] = error
+                self._later(meta)
+                self._store(folder, meta)
             running.drafting = False
+        self._auto_step(self._sid(folder))
 
     def send_mail(self, sid: str) -> None:
-        note = self._note(self._folder(sid))
+        folder = self._folder(sid)
+        note = self._note(folder)
         if not note:
             raise Refused(409, "Pas encore de note à envoyer.")
         try:
             self.send(note)
         except ToolError as e:
             raise Refused(502, f"Envoi impossible : {e}") from None
+        with self._mutex:
+            self._sent(folder, self._load(folder))
+
+    def _sent(self, folder: Path, meta: dict[str, Any]) -> None:
+        meta["envoye"] = self.clock()
+        if meta.get("auto") == "attente":
+            meta["auto"] = "fait"
+        meta.pop("erreur", None)
+        self._store(folder, meta)
+
+    # -- the automatic note ------------------------------------------------------------
+
+    def _later(self, meta: dict[str, Any]) -> None:
+        """A failed automatic step is tried again, less and less often, then given up."""
+        if meta.get("auto") != "attente":
+            return
+        tries = meta.get("auto_essais", 0) + 1
+        meta["auto_essais"] = tries
+        if tries >= AUTO_TRIES:
+            meta["auto"] = "abandon"
+        else:
+            meta["auto_apres"] = self.clock() + min(60 * 2 ** (tries - 1), 1800)
+
+    def _auto_step(self, sid: str) -> None:
+        """Draft, then mail, a closed session whose transcript is whole. Nobody has to ask."""
+        with self._mutex:
+            running = self._running.get(sid)
+            if running is None or running.drafting or running.mailing:
+                return
+            folder = running.session.folder
+            meta = self._load(folder)
+            if meta.get("auto") != "attente" or meta["phase"] != "close":
+                return
+            if running.session.pending(recording=False):
+                return
+            if self.clock() < meta.get("auto_apres", 0):
+                return
+            note = self._note(folder)
+            if note:
+                running.mailing = True
+                thread = threading.Thread(
+                    target=self._mail, args=(folder, running, note), daemon=True
+                )
+                running.threads.append(thread)
+                thread.start()
+                return
+            template = meta["trame"] if "trame" in meta else _current_template(self.desk)
+            if template not in self.desk.templates():
+                template = None
+            path = folder / TEXT_FILE
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            silence = (live.INAUDIBLE_PART, live.BROKEN_PART)
+            heard = [t for t in running.session.transcript().splitlines() if t not in silence]
+            try:
+                if not heard and not text.strip():
+                    raise Refused(400, "Rien d'audible.")
+                self._begin_draft(folder, meta, running, template, text)
+            except Refused:
+                meta.update(auto="abandon", erreur="Rien d'audible : pas de note automatique.")
+                self._store(folder, meta)
+
+    def _mail(self, folder: Path, running: _Running, note: str) -> None:
+        error = None
+        try:
+            self.send(note)
+        except ToolError as e:
+            error = f"Envoi automatique par mail impossible : {e}. La note est prête."
+        with self._mutex:
+            meta = self._load(folder)
+            if error:
+                meta["erreur"] = error
+                self._later(meta)
+                self._store(folder, meta)
+            else:
+                self._sent(folder, meta)
+            running.mailing = False
 
     # -- life cycle --------------------------------------------------------------------
 
@@ -548,6 +708,7 @@ class Gate:
 
 PAGE = ("index.html", "text/html; charset=utf-8")
 LOGIN = ("login.html", "text/html; charset=utf-8")
+WORKER = ("sw.js", "text/javascript; charset=utf-8")
 PUBLIC = {
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon-192.png": ("icon-192.png", "image/png"),
@@ -557,12 +718,23 @@ ROUTES = [
     ("POST", re.compile(r"^/api/seances$"), "create"),
     ("GET", re.compile(r"^/api/seances$"), "today"),
     ("GET", re.compile(r"^/api/seances/([^/]+)$"), "state"),
+    ("PUT", re.compile(r"^/api/seances/([^/]+)$"), "open"),
     ("PUT", re.compile(r"^/api/seances/([^/]+)/tranches/(\d{1,4})/(\d{1,6})$"), "chunk"),
     ("POST", re.compile(r"^/api/seances/([^/]+)/fin$"), "finish"),
     ("POST", re.compile(r"^/api/seances/([^/]+)/fichier$"), "upload"),
     ("POST", re.compile(r"^/api/seances/([^/]+)/note$"), "note"),
     ("POST", re.compile(r"^/api/seances/([^/]+)/mail$"), "mail"),
 ]
+
+
+def _wish_of(data: bytes) -> Wish | None:
+    if not data.strip():
+        return None
+    try:
+        asked = json.loads(data)
+        return Wish(asked.get("trame") or None, str(asked.get("texte") or ""))
+    except (ValueError, AttributeError):
+        raise Refused(400, "Demande illisible.") from None
 
 
 def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
@@ -573,7 +745,12 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
             pass
 
         def _send(
-            self, status: int, body: bytes, content_type: str, cookie: str | None = None
+            self,
+            status: int,
+            body: bytes,
+            content_type: str,
+            cookie: str | None = None,
+            mark: str | None = None,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -581,6 +758,8 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if mark:
+                self.send_header("X-Ecrivez", mark)  # tells sw.js this is the page worth keeping
             if cookie:
                 flags = f"Max-Age={COOKIE_SECONDS}; Path=/; HttpOnly; Secure; SameSite=Strict"
                 self.send_header("Set-Cookie", f"{COOKIE}={cookie}; {flags}")
@@ -593,7 +772,7 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
         def _file(self, entry: tuple[str, str]) -> None:
             name, content_type = entry
             body = (resources.files("ecrivez") / "resources" / "web" / name).read_bytes()
-            self._send(200, body, content_type)
+            self._send(200, body, content_type, mark="page" if entry is PAGE else None)
 
         def _login(self, body: _Body) -> None:
             try:
@@ -625,6 +804,9 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
                 return
             if method == "GET" and url.path == "/":
                 self._file(PAGE if allowed else LOGIN)
+                return
+            if method == "GET" and url.path == "/sw.js" and allowed:
+                self._file(WORKER)
                 return
             try:
                 body = _Body(self.rfile, self._length(MAX_UPLOAD))
@@ -661,7 +843,9 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
                 raise Refused(413, "Envoi trop volumineux.")
             data = body.read(MAX_CHUNK)
             if action == "create":
-                return 200, {"id": studio.create()}
+                return 200, {"id": studio.create(_wish_of(data))}
+            if action == "open":
+                return 200, {"id": studio.create(_wish_of(data), args[0])}
             if action == "today":
                 return 200, studio.today()
             if action == "state":
@@ -672,7 +856,7 @@ def make_handler(studio: Studio, gate: Gate) -> type[BaseHTTPRequestHandler]:
                     "resultat": studio.chunk(args[0], int(args[1]), int(args[2]), data, ext)
                 }
             if action == "finish":
-                studio.finish(args[0])
+                studio.finish(args[0], _wish_of(data))
                 return 200, {"ok": True}
             if action == "note":
                 try:
@@ -707,13 +891,16 @@ def make_server(studio: Studio, gate: Gate, port: int = DEFAULT_PORT) -> Threadi
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ecrivez-web", description="Ecrivez sur le téléphone.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--auto", action="store_true", help="rédiger et envoyer la note par mail sans attendre"
+    )
     args = parser.parse_args(argv)
     desk = open_desk()
 
     def transcriber() -> live.TranscribePart:
         return live.online_transcriber(audio.hint_from_lexicon(desk.lexicon()))
 
-    studio = Studio(desk, transcriber)
+    studio = Studio(desk, transcriber, auto=args.auto)
     studio.resume()
 
     def sweeper() -> None:

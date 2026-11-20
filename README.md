@@ -42,16 +42,10 @@ tailscale serve  --bg --https=8443 http://127.0.0.1:8377   # réseau Tailscale s
 tailscale funnel --bg --https=8443 http://127.0.0.1:8377   # ou : adresse publique
 ```
 
-Le serveur peut aussi tourner dans le téléphone lui-même (Termux, version F-Droid),
-sans rien exposer : la page s'ouvre alors sur `http://127.0.0.1:8377`. À lancer une fois
-dans Termux :
-
-```
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/matias-ceau/ecrivez/main/scripts/termux-install.sh)"
-```
-
-Sur le téléphone, la note est rédigée en ligne par le modèle `ECRIVEZ_DRAFT_MODEL`
-(`claude` n'existe pas sur Android) et le bouton de mail devient « Partager ».
+Avec `ecrivez-web --auto`, la note est rédigée puis envoyée par mail dès que la séance
+est finie, sans rien toucher (adresse : celle de la commande de mail, ou
+`ECRIVEZ_MAIL_TO`). La page se rouvre et enregistre même quand la maison est injoignable :
+l'audio reste dans le téléphone et part à la prochaine ouverture de la page avec du réseau.
 
 Détails et cas limites : [spec](docs/superpowers/specs/2026-11-19-mobile.md).
 

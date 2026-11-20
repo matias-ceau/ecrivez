@@ -48,21 +48,34 @@ class Kit:
         self.drafted: list[tuple[str, str | None]] = []
         self.mailed: list[str] = []
         self.can_mail = True
+        self.auto = False
+        self.mail_error: ToolError | None = None
+        self.heard = True
         self.draft_error: ToolError | None = None
         self.studio = self.new_studio()
 
     def new_studio(self) -> web.Studio:
         return web.Studio(
             self.desk,
-            transcriber=lambda: transcribe,
+            transcriber=lambda: transcribe if self.heard else (lambda part, previous: (None, "")),
             run=fake_run,
             draft=self.draft,
-            send=self.mailed.append,
+            send=self.send,
+            auto=self.auto,
             can_mail=lambda: self.can_mail,
             clock=self.clock,
             retry=0,
             poll=0.01,
         )
+
+    def send(self, note: str) -> None:
+        if self.mail_error:
+            raise self.mail_error
+        self.mailed.append(note)
+
+    def automatic(self) -> None:
+        self.auto = True
+        self.studio = self.new_studio()
 
     def draft(self, desk: Desk, source: str, template: str | None) -> str:
         if self.draft_error:
@@ -378,6 +391,174 @@ def test_two_devices_see_the_same_session(kit):
 # -- over HTTP -------------------------------------------------------------------------
 
 
+# -- the note written and mailed without being asked ----------------------------------
+
+
+def test_a_stopped_session_gets_its_note_drafted_and_mailed_by_itself(kit):
+    kit.automatic()
+    sid = kit.studio.create(web.Wish("psy"))
+    kit.studio.chunk(sid, 0, 0, b"ab")
+    kit.studio.finish(sid, web.Wish("tca", "Poids 52 kg"))
+    kit.studio.settle(sid)
+    ((source, template),) = kit.drafted
+    assert template == "tca"
+    assert "A : part000 (2 octets)" in source and "Poids 52 kg" in source
+    assert kit.mailed == ["NOTE"]
+    state = kit.studio.state(sid)
+    assert state["note"] == "NOTE" and state["envoye"] and state["auto"] is False
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.mailed == ["NOTE"]
+
+
+def test_without_a_choice_the_automatic_note_uses_the_usual_template(kit):
+    kit.automatic()
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    assert kit.drafted[0][1] == "tca"
+
+
+def test_the_free_form_choice_is_kept_for_the_automatic_note(kit):
+    kit.automatic()
+    sid = kit.studio.create(web.Wish(None))
+    kit.studio.chunk(sid, 0, 0, b"ab")
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    assert kit.drafted[0][1] is None
+
+
+def test_an_uploaded_file_also_ends_in_a_mailed_note(kit):
+    kit.automatic()
+    sid = kit.studio.create(web.Wish("psy", "Contexte"))
+    kit.studio.upload(sid, io.BytesIO(b"contenu m4a"), 11, "dictaphone.m4a")
+    kit.studio.settle(sid)
+    assert kit.drafted[0][1] == "psy" and "Contexte" in kit.drafted[0][0]
+    assert kit.mailed == ["NOTE"]
+
+
+def test_nothing_is_drafted_or_mailed_unless_asked_when_automatic_notes_are_off(kit):
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid, web.Wish("tca"))
+    kit.studio.settle(sid)
+    assert kit.drafted == [] and kit.mailed == []
+
+
+def test_a_failed_automatic_draft_is_tried_again_later(kit):
+    kit.automatic()
+    kit.draft_error = ToolError("claude", "hors ligne")
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    assert "Rédaction impossible" in kit.studio.state(sid)["erreur"]
+    kit.draft_error = None
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.mailed == []  # too early: the next try waits a minute
+    kit.clock.now += 61
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.mailed == ["NOTE"]
+    assert kit.studio.state(sid)["erreur"] is None
+
+
+def test_a_failed_automatic_mail_keeps_the_note_and_is_tried_again(kit):
+    kit.automatic()
+    kit.mail_error = ToolError("send_email.py", "SMTP")
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    state = kit.studio.state(sid)
+    assert state["note"] == "NOTE" and "Envoi automatique" in state["erreur"]
+    kit.mail_error = None
+    kit.clock.now += 61
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.mailed == ["NOTE"] and len(kit.drafted) == 1
+
+
+def test_automatic_tries_stop_after_too_many_failures(kit):
+    kit.automatic()
+    kit.draft_error = ToolError("claude", "hors ligne")
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    for _ in range(web.AUTO_TRIES + 2):
+        kit.clock.now += 3600
+        kit.studio.sweep()
+        kit.studio.settle(sid)
+    assert kit.studio.state(sid)["auto"] is False
+    kit.draft_error = None
+    kit.clock.now += 3600
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.drafted == [] and kit.mailed == []
+
+
+def test_a_recording_with_nothing_audible_gets_no_automatic_note(kit):
+    kit.heard = False
+    kit.automatic()
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    assert kit.drafted == [] and kit.mailed == []
+    assert "Rien d'audible" in kit.studio.state(sid)["erreur"]
+
+
+def test_mailing_by_hand_first_prevents_a_second_automatic_mail(kit):
+    kit.automatic()
+    kit.mail_error = ToolError("send_email.py", "SMTP")
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    kit.mail_error = None
+    kit.studio.send_mail(sid)
+    kit.clock.now += 3600
+    kit.studio.sweep()
+    kit.studio.settle(sid)
+    assert kit.mailed == ["NOTE"]
+
+
+def test_after_a_restart_a_note_still_owed_is_drafted_and_mailed(kit):
+    kit.automatic()
+    kit.draft_error = ToolError("claude", "hors ligne")
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    kit.studio.settle(sid)
+    kit.studio.shutdown()
+    kit.draft_error = None
+    kit.clock.now += 61
+    kit.studio = kit.new_studio()
+    kit.studio.resume()
+    kit.studio.settle(sid)
+    assert kit.mailed == ["NOTE"]
+
+
+# -- recorded with the house out of reach, sent later ---------------------------------
+
+
+def test_a_phone_that_recorded_offline_names_its_session_and_may_repeat_itself(kit):
+    sid = "2026-11-20_140500-9123"
+    assert kit.studio.create(web.Wish("psy"), sid) == sid
+    kit.studio.chunk(sid, 0, 0, b"ab")
+    assert kit.studio.create(web.Wish("tca"), sid) == sid  # sent twice: nothing is reset
+    assert (kit.folder(sid) / "parts" / "part000.webm").read_bytes() == b"ab"
+    assert kit.studio.state(sid)["etat"] == "enregistrement"
+
+
+def test_audio_recorded_offline_is_accepted_even_if_the_opening_never_arrived(kit):
+    sid = "2026-11-20_140500-9123"
+    assert kit.studio.chunk(sid, 0, 0, b"ab") == "recu"
+    assert (kit.folder(sid) / "parts" / "part000.webm").read_bytes() == b"ab"
+
+
+@pytest.mark.parametrize("sid", ["2026-13-40_140500", "2026-11-20_996000", "../../etc", "x"])
+def test_a_session_name_that_is_not_a_real_date_and_time_is_refused(kit, sid):
+    with pytest.raises(web.Refused):
+        kit.studio.create(None, sid)
+    assert not list((kit.desk.root / "sorties").glob("*/*/web.json"))
+
+
 CODE = "abcd-efgh-jkmn-pqrs-tuvw"
 COOKIE = f"ecrivez={web.Gate(CODE).cookie}"
 
@@ -544,3 +725,30 @@ def test_the_page_is_told_when_this_machine_cannot_send_mail(kit):
     assert kit.studio.today()["mail"] is True
     kit.can_mail = False
     assert kit.studio.today()["mail"] is False
+
+
+def test_a_session_recorded_offline_arrives_over_http_and_is_mailed(kit, server):
+    kit.studio.auto = True
+    sid = "2026-11-20_140500-9123"
+    wish = json.dumps({"trame": "psy", "texte": "Contexte"}).encode()
+    assert call("PUT", f"{server}/api/seances/{sid}", wish) == (200, {"id": sid})
+    assert call("PUT", f"{server}/api/seances/{sid}/tranches/0/0", b"ab")[0] == 200
+    assert call("POST", f"{server}/api/seances/{sid}/fin", wish)[0] == 200
+    kit.studio.settle(sid)
+    assert kit.drafted[0][1] == "psy" and "Contexte" in kit.drafted[0][0]
+    assert kit.mailed == ["NOTE"]
+    state = call("GET", f"{server}/api/seances/{sid}")[1]
+    assert state["envoye"] and state["note"] == "NOTE"
+    assert call("PUT", f"{server}/api/seances/2026-99-99_000000", b"")[0] == 400
+
+
+def test_the_offline_helper_is_served_only_with_the_code_and_marks_the_real_page(server):
+    worker = urllib.request.Request(f"{server}/sw.js", headers={"Cookie": COOKIE})
+    with urllib.request.urlopen(worker, timeout=5) as r:
+        assert "javascript" in r.headers["Content-Type"]
+    assert call("GET", f"{server}/sw.js", cookie=None)[0] == 401
+    page = urllib.request.Request(f"{server}/", headers={"Cookie": COOKIE})
+    with urllib.request.urlopen(page, timeout=5) as r:
+        assert r.headers["X-Ecrivez"] == "page"
+    with urllib.request.urlopen(f"{server}/", timeout=5) as r:
+        assert r.headers["X-Ecrivez"] is None

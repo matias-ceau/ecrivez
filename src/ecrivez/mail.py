@@ -20,4 +20,7 @@ def send(note: str, env: Mapping[str, str] = os.environ, run: Run = run_tool) ->
     """The subject carries only the date: nothing about the patient outside the body."""
     command = env.get("ECRIVEZ_MAIL_COMMAND") or DEFAULT_COMMAND
     subject = f"Note ecrivez {datetime.now():%Y-%m-%d %H:%M}"
-    run([command, "-s", subject, "-c", note], None)
+    argv = [command, "-s", subject, "-c", note]
+    if to := env.get("ECRIVEZ_MAIL_TO"):
+        argv += ["--email-receiver", to]
+    run(argv, None)
