@@ -646,6 +646,26 @@ def test_after_a_restart_a_note_still_owed_is_drafted_and_mailed(kit):
     assert kit.mailed == ["NOTE"]
 
 
+def test_after_a_restart_a_closed_session_not_yet_transcribed_still_gets_its_note(kit):
+    kit.automatic()
+    tried = threading.Event()
+
+    def down(part: Path, previous: str):
+        tried.set()
+        raise ToolError("transcription en ligne", "crédit épuisé")
+
+    kit.studio.transcriber = lambda: down
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    assert tried.wait(5)
+    kit.studio.shutdown()
+    kit.studio = kit.new_studio()
+    kit.studio.resume()
+    kit.studio.settle(sid)
+    assert kit.studio.state(sid)["etat"] == "terminee"
+    assert kit.mailed == ["NOTE"]
+
+
 # -- recorded with the house out of reach, sent later ---------------------------------
 
 

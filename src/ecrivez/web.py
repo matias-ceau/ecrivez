@@ -331,6 +331,7 @@ class Studio:
     def resume(self) -> None:
         """After a restart: pick every unfinished session up where it was."""
         with self._mutex:
+            owed: list[tuple[str, Path]] = []
             for state in sorted((self.desk.root / "sorties").glob(f"*/*/{STATE}")):
                 folder = state.parent
                 sid, meta = self._sid(folder), self._load(folder)
@@ -346,11 +347,13 @@ class Studio:
                 elif meta["phase"] == "decoupage":
                     self._cut_later(sid, folder)
                 elif meta.get("auto") == "attente":
-                    self._of(sid, folder)
+                    owed.append((sid, folder))
             for session in live.unfinished_sessions(self.desk.root):
                 sid = self._sid(session.folder)
                 if sid not in self._running:
                     self._work(sid, self._of(sid, session.folder))
+            for sid, folder in owed:  # after the workers: a note may be owed before any text
+                self._of(sid, folder)
             for sid in list(self._running):
                 self._auto_step(sid)
 
