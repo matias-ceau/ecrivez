@@ -215,6 +215,7 @@ class Worker(threading.Thread):
         self.done = threading.Event()
         self.stop = threading.Event()  # leave at once, touching nothing (server shutdown)
         self.audio: Path | None = None
+        self.trouble = ""  # why the last try failed; empty again once something goes through
 
     def run(self) -> None:
         while True:
@@ -236,9 +237,11 @@ class Worker(threading.Thread):
                 self.notify("tranche illisible ignorée")
                 continue
             except (ToolError, OSError) as e:
+                self.trouble = str(e)
                 self.notify(f"Transcription en attente ({e}), nouvel essai dans un instant")
                 self.stop.wait(self.retry)
                 continue
+            self.trouble = ""
             if part not in self.session.pending(recording=self.recording.is_set()):
                 continue  # recording resumed into this part meanwhile: transcribe it again later
             self.session.store(part, text, raw)
@@ -247,6 +250,7 @@ class Worker(threading.Thread):
             self.audio = self.session.assemble(self.run_tool)
             self.notify("terminé")
         except (ToolError, OSError) as e:
+            self.trouble = str(e)
             self.notify(f"Assemblage de l'audio impossible ({e}) ; les tranches sont gardées")
         self.session.release()
         self.done.set()

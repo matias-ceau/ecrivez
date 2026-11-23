@@ -363,7 +363,9 @@ function render() {
     const progress = s.tranches ? ` · ${s.transcrites}/${s.tranches} tranches transcrites` : "";
     if (s.etat === "enregistrement") text = (mine ? "Enregistrement en cours" : "Séance ouverte, enregistrée ailleurs ou interrompue") + progress;
     else if (s.etat === "pause") text = "En pause : plus rien reçu du téléphone. Ce qui est arrivé est transcrit.";
-    else if (s.etat === "transcription") text = "Transcription" + progress;
+    else if (s.etat === "transcription") text = s.panne
+      ? `Transcription bloquée, nouvel essai tout seul. L'audio est gardé. Raison : ${s.panne}`
+      : "Transcription" + progress;
     else if (s.etat === "terminee") {
       if (s.envoye) text = `Note envoyée par mail à ${s.envoye} (${s.envoye_a || "adresse habituelle"}).`;
       else if (s.note) text = s.auto ? "Note prête, envoi par mail en cours…" : "Note prête.";
@@ -382,7 +384,7 @@ function render() {
     : queued ? "L'enregistrement est gardé dans le téléphone : rouvrez cette page quand la maison est joignable, il partira tout seul." : "");
   const status = $("status");
   status.textContent = alertText || text;
-  status.className = alertText || (s && s.erreur) || offline || locked ? "alert" : "";
+  status.className = alertText || (s && (s.erreur || s.panne)) || offline || locked ? "alert" : "";
   const open = s && (s.etat === "enregistrement" || s.etat === "pause") && !mine;
   $("close").hidden = !open;
   $("draft").disabled = !sid && !$("text").value.trim() || !!recording || !!(s && s.redaction);
