@@ -459,6 +459,7 @@ class Studio:
                 "envoye_a": meta.get("envoye_a") or None,
                 "erreur": meta.get("erreur"),
                 "message": running.message if running else "",
+                "panne": running.worker.trouble if running and running.worker else "",
             }
 
     def today(self) -> dict[str, Any]:

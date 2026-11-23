@@ -259,6 +259,35 @@ def test_transcription_errors_are_retried(tmp_path):
     kit.studio.shutdown()
 
 
+def test_a_transcription_that_keeps_failing_says_why(tmp_path):
+    kit = Kit(tmp_path)
+    down, tried_twice, calls = threading.Event(), threading.Event(), []
+    down.set()
+
+    def flaky(part: Path, previous: str):
+        calls.append(part.name)
+        if len(calls) > 1:
+            tried_twice.set()  # the first failure is on record by now
+        if down.is_set():
+            raise ToolError("transcription en ligne", "crédit épuisé")
+        return "A : ok", "A : ok"
+
+    kit.studio.transcriber = lambda: flaky
+    sid = record(kit, [(0, 0, b"ab")])
+    kit.studio.finish(sid)
+    assert tried_twice.wait(5)
+    state = kit.studio.state(sid)
+    assert state["etat"] == "transcription"
+    assert state["panne"] == "transcription en ligne : crédit épuisé"
+
+    down.clear()
+    kit.studio.settle(sid)
+    state = kit.studio.state(sid)
+    assert state["transcription"] == "A : ok"
+    assert state["panne"] == ""
+    kit.studio.shutdown()
+
+
 # -- sending a file --------------------------------------------------------------------
 
 
